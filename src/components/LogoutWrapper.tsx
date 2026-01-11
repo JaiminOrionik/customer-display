@@ -17,7 +17,7 @@ export default function LogoutWrapper({
     const checkAuth = () => {
       const token = localStorage.getItem("auth_token") || sessionStorage.getItem("auth_token");
       if (!token) {
-        router.push("/login");
+        router.push("/");
       }
     };
 
