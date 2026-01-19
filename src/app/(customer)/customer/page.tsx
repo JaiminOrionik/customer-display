@@ -1,502 +1,223 @@
+// src/app/(customer)/customer/page.tsx
 "use client";
 
-import Image from "next/image";
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
-import LogoutButton from "@/components/LogoutButton"
+import { doc, onSnapshot } from "firebase/firestore";
 
-type Appointment = {
-  appointmentId: string;
-  customerName: string;
-  appointmentTime: string; 
-  barberName: string;
-  outletName: string;
-  outletId: string;
-  startTime: string;
-  endTime: string;
-  status: string;
-  queuePosition: number;
-};
+import DashboardHeader from "@/components/dashboard/DashboardHeader";
+import AppointmentQueue from "@/components/dashboard/AppointmentQueue";
+import BillingDisplay from "@/components/display/BillingDisplay";
 
-type Row = {
-  id: number;
-  name: string;
-  appointmentId: string;
-  appointmentTime: string;
-  status: string;
-  minutesToAppointment: number;
-  outletId: string;
-};
+import { useAuth } from "@/hooks/useAuth";
+import { useWebSocket } from "@/hooks/useWebSocket";
+import { formatAppointmentsToRows } from "@/utils/appointmentUtils";
+import type { Row } from "@/types/appointment";
 
-type WebSocketMessage = {
-  type: string;
-  data: Appointment[];
-  timestamp: string;
-};
+import { db } from "@/app/firestore";
+import { 
+  updateActivityStatus, 
+  setBillingStatus, 
+  setQueueStatus,
+  shouldShowBilling 
+} from "../../status";
 
-// Helper functions
-const decodeJWT = (token: string): any | null => {
-  try {
-    const tokenParts = token.split('.');
-    if (tokenParts.length !== 3) return null;
-    
-    const payload = tokenParts[1];
-    const base64 = payload.replace(/-/g, '+').replace(/_/g, '/');
-    const jsonPayload = decodeURIComponent(
-      atob(base64)
-        .split('')
-        .map(c => '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2))
-        .join('')
-    );
-    
-    return JSON.parse(jsonPayload);
-  } catch (error) {
-    return null;
-  }
-};
-
-// Extract start time from "13:30 - 14:00"
-const extractStartTime = (appointmentTime: string): string => {
-  const match = appointmentTime.match(/^(\d{1,2}):(\d{2})/);
-  return match ? match[0] : ""; // Returns "13:30"
-};
-
-// Parse time string "13:30" to hours and minutes
-const parseTimeString = (timeStr: string): { hours: number; minutes: number } | null => {
-  const match = timeStr.match(/^(\d{1,2}):(\d{2})$/);
-  if (!match) return null;
-  
-  const hours = parseInt(match[1], 10);
-  const minutes = parseInt(match[2], 10);
-  
-  if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59) return null;
-  
-  return { hours, minutes };
-};
-
-// Calculate minutes difference between current time and appointment start time
-const calculateMinutesToAppointment = (appointmentTime: string): number => {
-  const startTimeStr = extractStartTime(appointmentTime);
-  if (!startTimeStr) return 0;
-  
-  const parsedTime = parseTimeString(startTimeStr);
-  if (!parsedTime) return 0;
-  
-  const now = new Date();
-  const currentHours = now.getHours();
-  const currentMinutes = now.getMinutes();
-  const currentTotalMinutes = currentHours * 60 + currentMinutes;
-  const appointmentTotalMinutes = parsedTime.hours * 60 + parsedTime.minutes;
-  
-  return appointmentTotalMinutes - currentTotalMinutes;
-};
+type DisplayMode = "QUEUE" | "BILLING";
 
 export default function Home() {
   const [allRows, setAllRows] = useState<Row[]>([]);
   const [isMobile, setIsMobile] = useState(false);
-  const [screenHeight, setScreenHeight] = useState(0);
-  const [screenWidth, setScreenWidth] = useState(0);
-  const [isConnected, setIsConnected] = useState(false);
-  const [connectionStatus, setConnectionStatus] = useState("Disconnected");
-  const [currentOutletId, setCurrentOutletId] = useState<string | null>(null);
-  const [currentTime, setCurrentTime] = useState<string>("");
-  
-  const containerRef = useRef<HTMLDivElement>(null);
-  const wsRef = useRef<WebSocket | null>(null);
-  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const [currentTime, setCurrentTime] = useState("");
+  const [displayMode, setDisplayMode] = useState<DisplayMode>("QUEUE");
+  const [isUpdatingStatus, setIsUpdatingStatus] = useState(false);
+  const [isActive, setIsActive] = useState<boolean>(false);
+
   const router = useRouter();
+  const { token, tenantId, outletId } = useAuth();
 
-  // Get token, tenantId, and outletId from TOKEN
-  const getAuthData = useCallback(() => {
-    if (typeof window === 'undefined') return { token: null, tenantId: null, outletId: null };
-    
-    const token = localStorage.getItem("auth_token") || sessionStorage.getItem("auth_token");
-    
-    let tenantId = null;
-    let outletId = null;
-    
-    if (token) {
-      try {
-        const decodedToken = decodeJWT(token);
-        if (decodedToken) {
-          tenantId = decodedToken.tenantId;
-          outletId = decodedToken.outletId;
-        }
-      } catch (e) {
-        console.error("Error extracting data from token:", e);
-      }
+  const { isConnected, connectionStatus, webSocketData, handleReconnect } =
+    useWebSocket({ token, tenantId });
+
+  /* ---------------- Listen to Firestore 'active' field changes ---------------- */
+  useEffect(() => {
+    if (!tenantId || !outletId) {
+      console.log("No tenantId or outletId available");
+      return;
     }
-    
-    return { token, tenantId, outletId };
-  }, []);
 
-  // Filter appointments by outletId
-  const filterAppointmentsByOutlet = useCallback((appointments: Appointment[], outletId: string | null): Appointment[] => {
-    if (!outletId) return appointments;
-    return appointments.filter(app => app.outletId === outletId);
-  }, []);
-
-  // Format appointment data to rows
-  const formatAppointmentsToRows = useCallback((appointments: Appointment[], outletId: string | null): Row[] => {
-    // Filter by outlet
-    const filteredAppointments = filterAppointmentsByOutlet(appointments, outletId);
+    console.log(`Setting up Firestore listener for: ${tenantId}/${outletId}`);
     
-    // Format rows with time calculation
-    const rows = filteredAppointments.map((app, index) => {
-      const minutesToAppointment = calculateMinutesToAppointment(app.appointmentTime);
-      
-      return {
-        id: index + 1,
-        name: app.customerName,
-        appointmentId: app.appointmentId,
-        appointmentTime: app.appointmentTime,
-        status: app.status,
-        minutesToAppointment,
-        outletId: app.outletId
-      };
-    });
+    const docRef = doc(db, tenantId, outletId);
     
-    // Sort: CHECKED_IN first, then by time (closest first)
-    return rows.sort((a, b) => {
-      if (a.status === 'CHECKED_IN' && b.status !== 'CHECKED_IN') return -1;
-      if (a.status !== 'CHECKED_IN' && b.status === 'CHECKED_IN') return 1;
-      return a.minutesToAppointment - b.minutesToAppointment;
-    })
-    .map((row, index) => ({
-      ...row,
-      id: index + 1
-    }));
-  }, [filterAppointmentsByOutlet]);
-
-  // Handle WebSocket messages
-  const handleWebSocketMessage = useCallback((message: WebSocketMessage) => {
-    if (message.type === 'INITIAL_DATA' || message.type === 'queue_update') {
-      if (Array.isArray(message.data)) {
-        const formattedRows = formatAppointmentsToRows(message.data, currentOutletId);
-        setAllRows(formattedRows);
-      }
-    }
-  }, [formatAppointmentsToRows, currentOutletId]);
-
-  // Initialize WebSocket connection
-  const connectWebSocket = useCallback(() => {
-    const { token, tenantId, outletId } = getAuthData();
-    
-    setCurrentOutletId(outletId);
-    
-    if (!token || !tenantId) {
-      router.push("/");
-      return () => {};
-    }
-    
-    const wsUrl = `wss://api.aaravpos.com/ws/queue?tenantId=${tenantId}&token=${token}`;
-    
-    if (wsRef.current) {
-      wsRef.current.close();
-    }
-    
-    const ws = new WebSocket(wsUrl);
-    wsRef.current = ws;
-    
-    const onOpen = () => {
-      setIsConnected(true);
-      setConnectionStatus("Connected");
-      
-      ws.send(JSON.stringify({
-        type: 'subscribe',
-        channel: 'queue_updates'
-      }));
-    };
-    
-    const onMessage = (event: MessageEvent) => {
-      try {
-        const message: WebSocketMessage = JSON.parse(event.data);
-        handleWebSocketMessage(message);
-      } catch (error) {
-        console.error("Error parsing WebSocket message:", error);
-      }
-    };
-    
-    const onError = (error: Event) => {
-      setConnectionStatus("Error - Reconnecting...");
-      setIsConnected(false);
-    };
-    
-    const onClose = () => {
-      setIsConnected(false);
-      setConnectionStatus("Disconnected - Reconnecting...");
-      
-      if (reconnectTimeoutRef.current) {
-        clearTimeout(reconnectTimeoutRef.current);
-      }
-      
-      reconnectTimeoutRef.current = setTimeout(() => {
-        const { token, tenantId } = getAuthData();
-        if (!token || !tenantId) return;
+    const unsubscribe = onSnapshot(docRef, (docSnap) => {
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        const activeStatus = data.active || false;
+        console.log("Firestore active status updated:", activeStatus);
+        setIsActive(activeStatus);
         
-        connectWebSocket();
-      }, 3000);
-    };
-    
-    ws.onopen = onOpen;
-    ws.onmessage = onMessage;
-    ws.onerror = onError;
-    ws.onclose = onClose;
-    
-    return () => {
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.close();
+        // Automatically switch display mode based on 'active' field
+        if (shouldShowBilling(activeStatus)) {
+          setDisplayMode("BILLING");
+        } else {
+          setDisplayMode("QUEUE");
+        }
+        
+        // Debug log the full data structure
+        console.log("Full Firestore data:", {
+          active: data.active,
+          customer: data.customer,
+          items: data.items,
+          totals: data.totals,
+          summary: data.summary,
+          status: data.status
+        });
+      } else {
+        console.log("Document doesn't exist, defaulting to QUEUE mode");
+        setIsActive(false);
+        setDisplayMode("QUEUE");
       }
+    }, (error) => {
+      console.error("Error in Firestore listener:", error);
+    });
+
+    return () => {
+      console.log("Cleaning up Firestore listener");
+      unsubscribe();
     };
-  }, [getAuthData, router, handleWebSocketMessage]);
+  }, [tenantId, outletId]);
 
-  // Update screen size
-  useEffect(() => {
-    const updateScreenSize = () => {
-      setScreenWidth(window.innerWidth);
-      setScreenHeight(window.innerHeight);
-      setIsMobile(window.innerWidth < 768);
-    };
-
-    updateScreenSize();
-    window.addEventListener('resize', updateScreenSize);
-    return () => window.removeEventListener('resize', updateScreenSize);
-  }, []);
-
-  // Update current time display
-  useEffect(() => {
-    const updateCurrentTime = () => {
-      const now = new Date();
-      setCurrentTime(now.toLocaleTimeString('en-IN', {
-        hour: '2-digit',
-        minute: '2-digit',
-        second: '2-digit',
-        hour12: false
-      }));
-    };
-
-    updateCurrentTime();
-    const interval = setInterval(updateCurrentTime, 1000);
-    return () => clearInterval(interval);
-  }, []);
-
-  // Initialize WebSocket
-  useEffect(() => {
-    const { token, tenantId } = getAuthData();
-    if (!token || !tenantId) {
-      router.push("/");
+  /* ---------------- handle display mode change ---------------- */
+  const handleDisplayModeChange = useCallback(async (mode: DisplayMode) => {
+    if (!tenantId || !outletId) {
+      alert("Authentication required. Please login again.");
       return;
     }
     
-    const cleanup = connectWebSocket();
-    
-    return () => {
-      if (cleanup) cleanup();
-      if (reconnectTimeoutRef.current) {
-        clearTimeout(reconnectTimeoutRef.current);
+    try {
+      setIsUpdatingStatus(true);
+      console.log(`Changing display mode to: ${mode} for ${outletId}`);
+      
+      // Update Firestore 'active' field based on display mode
+      if (mode === "BILLING") {
+        await setBillingStatus(tenantId, outletId);
+      } else {
+        await setQueueStatus(tenantId, outletId);
       }
-      if (wsRef.current) {
-        wsRef.current.close();
-      }
+      
+    } catch (error) {
+      console.error("Failed to update active status:", error);
+      alert("Failed to update status. Please try again.");
+    } finally {
+      setIsUpdatingStatus(false);
+    }
+  }, [tenantId, outletId]);
+
+  /* ---------------- websocket data ---------------- */
+  useEffect(() => {
+    if (Array.isArray(webSocketData)) {
+      const formattedRows = formatAppointmentsToRows(webSocketData, outletId);
+      setAllRows(formattedRows);
+    }
+  }, [webSocketData, outletId]);
+
+  /* ---------------- screen size ---------------- */
+  useEffect(() => {
+    const updateScreenSize = () => setIsMobile(window.innerWidth < 768);
+    updateScreenSize();
+    window.addEventListener("resize", updateScreenSize);
+    return () => window.removeEventListener("resize", updateScreenSize);
+  }, []);
+
+  /* ---------------- clock ---------------- */
+  useEffect(() => {
+    const tick = () => {
+      const now = new Date();
+      setCurrentTime(
+        now.toLocaleTimeString("en-IN", {
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit",
+          hour12: false,
+        })
+      );
     };
-  }, [connectWebSocket, getAuthData, router]);
 
-  // Split rows into columns
-  const getColumns = () => {
-    if (isMobile || allRows.length <= 8) {
-      return [allRows];
-    }
-    
-    const middleIndex = Math.ceil(allRows.length / 2);
-    return [allRows.slice(0, middleIndex), allRows.slice(middleIndex)];
-  };
+    tick();
+    const i = setInterval(tick, 1000);
+    return () => clearInterval(i);
+  }, []);
 
-  const handleReconnect = () => {
-    if (reconnectTimeoutRef.current) {
-      clearTimeout(reconnectTimeoutRef.current);
+  /* ---------------- auth guard ---------------- */
+  useEffect(() => {
+    if (!token || !tenantId || !outletId) {
+      console.log("No auth data, redirecting to login");
+      router.push("/");
     }
-    if (wsRef.current) {
-      wsRef.current.close();
-    }
-    connectWebSocket();
-  };
+  }, [token, tenantId, outletId, router]);
+
+  /* ---------------- column split ---------------- */
+  const getColumns = useCallback(() => {
+    if (isMobile || allRows.length <= 8) return [allRows];
+    const mid = Math.ceil(allRows.length / 2);
+    return [allRows.slice(0, mid), allRows.slice(mid)];
+  }, [allRows, isMobile]);
 
   const columns = getColumns();
 
+  /* ---------------- Show loading while checking auth ---------------- */
+  if (!token || !tenantId || !outletId) {
+    return (
+      <div className="min-h-screen bg-white flex items-center justify-center">
+        <div className="text-gray-600">Loading authentication...</div>
+      </div>
+    );
+  }
+
+  /* ---------------- render ---------------- */
   return (
-    <div className="min-h-screen bg-white" ref={containerRef}>
-      <header className="flex items-center justify-between px-4 sm:px-6 py-4 border-b border-slate-200 bg-white sticky top-0 z-40">
-        <div className="flex items-center gap-2">
-          <Image
-            src="/logo/AaravPOS-Logo.png"
-            alt="AaravPOS"
-            width={120}
-            height={32}
-            className="w-24 sm:w-32 md:w-40"
-            priority
-          />
-          <div className="flex flex-col ml-4">
-            <div className="flex items-center gap-2">
-              <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-500' : 'bg-red-500'}`}></div>
-              <span className="text-xs text-slate-600">{connectionStatus}</span>
-              {!isConnected && (
-                <button
-                  onClick={handleReconnect}
-                  className="text-xs px-2 py-1 bg-slate-100 rounded hover:bg-slate-200"
-                >
-                  Reconnect
-                </button>
-              )}
-            </div>
-            <div className="text-xs text-slate-600 mt-1">
-              Current time: {currentTime}
-            </div>
-            {currentOutletId && (
-              <div className="text-xs text-blue-600 mt-1">
-                Outlet: {currentOutletId.substring(0, 8)}...
-              </div>
-            )}
-          </div>
-        </div>
-        
-        <div className="flex items-center gap-4">
-          <div className="hidden sm:block text-sm text-slate-600">
-            {allRows.length} appointments
-          </div>
-          <LogoutButton />
-        </div>
-      </header>
+    <div className="min-h-screen bg-white">
+      <DashboardHeader
+        isConnected={isConnected}
+        connectionStatus={connectionStatus}
+        currentTime={currentTime}
+        currentOutletId={outletId}
+        appointmentCount={allRows.length}
+        onReconnect={handleReconnect}
+        displayMode={displayMode}
+        onChangeDisplay={handleDisplayModeChange}
+        isUpdatingStatus={isUpdatingStatus}
+        isActive={isActive} // Pass the active status
+      />
 
       <main className="px-4 sm:px-6 pb-6">
-        <div className="mx-auto w-full max-w-6xl bg-white">
-          <div className="overflow-y-auto" style={{ 
-            maxHeight: `calc(100vh - 180px)`,
-            minHeight: '300px'
-          }}>
-            <div className={`grid gap-0 ${columns.length > 1 ? 'md:grid-cols-2' : 'grid-cols-1'}`}>
-              {columns.map((column, colIndex) => (
-                <div key={colIndex} className="relative">
-                  <div className="px-4 sm:px-6">
-                    {column.length === 0 ? (
-                      <div className="flex items-center justify-center h-32 text-slate-400">
-                        No appointments
-                      </div>
-                    ) : (
-                      column.map((row) => (
-                        <CountdownRowItem 
-                          key={`${row.id}-${row.appointmentId}`} 
-                          row={row} 
-                          colIndex={colIndex}
-                        />
-                      ))
-                    )}
-                  </div>
-                  
-                  {colIndex === 0 && columns.length > 1 && (
-                    <div className="hidden md:block absolute right-0 top-0 bottom-0 w-px bg-slate-300" />
-                  )}
-                </div>
-              ))}
+        <div className="mx-auto w-full max-w-7xl bg-white">
+          {/* Show QUEUE when active is false */}
+          {displayMode === "QUEUE" && (
+            <div
+              className="overflow-y-auto"
+              style={{ maxHeight: "calc(100vh - 180px)", minHeight: 300 }}
+            >
+              <AppointmentQueue columns={columns} />
             </div>
-          </div>
+          )}
+
+          {/* Show BILLING when active is true */}
+          {displayMode === "BILLING" && (
+            <BillingDisplay />
+          )}
+
+          {/* Debug info - remove in production */}
+          {/* <div className="fixed bottom-4 right-4 bg-gray-800 text-white px-4 py-2 rounded-lg shadow-lg text-sm z-50">
+            <div>Active: <span className={`font-bold ${isActive ? 'text-green-400' : 'text-red-400'}`}>
+              {isActive ? 'TRUE (BILLING)' : 'FALSE (QUEUE)'}
+            </span></div>
+            <div>Appointments: {allRows.length}</div>
+            <div>Mode: {displayMode}</div>
+            {isUpdatingStatus && <div className="text-yellow-300">Updating...</div>}
+          </div> */}
         </div>
       </main>
     </div>
   );
 }
-
-interface CountdownRowItemProps {
-  row: Row;
-  colIndex: number;
-}
-
-function CountdownRowItem({ row, colIndex }: CountdownRowItemProps) {
-  const [timeDisplay, setTimeDisplay] = useState<string>("");
-
-  const formatTimeDisplay = (minutes: number): string => {
-    // Always show 0 min for CHECKED_IN appointments
-    if (row.status === 'CHECKED_IN') {
-      return "0 min";
-    }
-    
-    // For BOOKED appointments
-    if (minutes < 0) {
-      return "0 min";
-    }
-    
-    if (minutes === 0) {
-      return "Now";
-    }
-    
-    if (minutes < 60) {
-      return `${minutes} min`;
-    }
-    
-    const hours = Math.floor(minutes / 60);
-    const remainingMinutes = minutes % 60;
-    
-    if (remainingMinutes === 0) {
-      return `${hours} hr`;
-    }
-    
-    return `${hours} hr ${remainingMinutes} min`;
-  };
-
-  const calculateCurrentMinutes = () => {
-    const startTimeStr = extractStartTime(row.appointmentTime);
-    if (!startTimeStr) return 0;
-    
-    const parsedTime = parseTimeString(startTimeStr);
-    if (!parsedTime) return 0;
-    
-    const now = new Date();
-    const currentHours = now.getHours();
-    const currentMinutes = now.getMinutes();
-    const currentTotalMinutes = currentHours * 60 + currentMinutes;
-    const appointmentTotalMinutes = parsedTime.hours * 60 + parsedTime.minutes;
-    
-    return appointmentTotalMinutes - currentTotalMinutes;
-  };
-
-  useEffect(() => {
-    const updateDisplay = () => {
-      const minutes = calculateCurrentMinutes();
-      setTimeDisplay(formatTimeDisplay(minutes));
-    };
-
-    updateDisplay();
-    const interval = setInterval(updateDisplay, 1000);
-    
-    return () => clearInterval(interval);
-  }, [row.appointmentTime, row.status]);
-
-  return (
-    <div className="flex items-center justify-between border-b border-slate-200 py-3 text-sm hover:bg-slate-50 transition-colors duration-150 bg-white">
-      <div className="flex w-full items-center gap-4">
-        <div className="w-8 text-slate-700 flex items-center gap-1">
-          {row.id}.
-          {colIndex === 0 && (
-            <span className="text-xs text-blue-500">←</span>
-          )}
-          {colIndex === 1 && (
-            <span className="text-xs text-green-500">→</span>
-          )}
-        </div>
-        
-        {/* LEFT SIDE: ONLY CUSTOMER NAME */}
-        <div className="flex-1 min-w-0">
-          <div className="font-medium text-slate-900 truncate">
-            {row.name}
-          </div>
-        </div>
-        
-        {/* RIGHT SIDE: ONLY TIME */}
-        <div className="w-20 text-right">
-          <div className="font-medium text-slate-700">
-            {timeDisplay}
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}   
