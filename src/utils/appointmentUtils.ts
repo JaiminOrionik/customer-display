@@ -39,13 +39,14 @@ export const calculateMinutesToAppointment = (appointmentTime: string): number =
 };
 
 export const formatTimeDisplay = (minutes: number, status: string): string => {
-  // Always show 0 min for CHECKED_IN appointments
-  if (status === 'CHECKED_IN') {
-    return "0 min";
-  }
+  // For CHECKED_IN appointments, still show the countdown
+  // Only show "0 min" when the appointment time has actually passed
   
-  // For BOOKED appointments
-  if (minutes < 0) {
+  if (minutes <= 0) {
+    // If time has passed or it's exactly now
+    if (status === 'CHECKED_IN') {  
+      return "0 min";
+    }
     return "0 min";
   }
   
@@ -102,3 +103,21 @@ export const formatAppointmentsToRows = (appointments: Appointment[], outletId: 
     id: index + 1
   }));
 };
+
+// Add this to your appointmentUtils.ts file
+
+export function filterTodaysAppointments(appointments: any[]): any[] {
+  if (!Array.isArray(appointments)) return [];
+  
+  const today = new Date();
+  const todayDateStr = today.toISOString().split('T')[0]; // Get YYYY-MM-DD format
+  
+  return appointments.filter(appointment => {
+    if (!appointment.startTime) return false;
+    
+    const appointmentDate = new Date(appointment.startTime);
+    const appointmentDateStr = appointmentDate.toISOString().split('T')[0];
+    
+    return appointmentDateStr === todayDateStr;
+  });
+}
