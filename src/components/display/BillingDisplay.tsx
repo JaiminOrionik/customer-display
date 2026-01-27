@@ -54,6 +54,7 @@ interface Totals {
   paidCents: number;
   tenderedCents: number;
   totalCents: number;
+  discountCents: number;
 }
 
 type FsTimestamp = Timestamp | null | undefined;
@@ -151,7 +152,7 @@ export default function BillingDisplay() {
       items.reduce((sum, it) => sum + (it.lineTotalCents || 0), 0) || 0;
 
     const subTotalCents = totals?.totalCents || itemsSubtotalCents;
-    const discountCents = totals?.appliedAmountCents || 0;
+    const discountCents = totals?.discountCents || 0;
 
     const taxCents = summary ? parseFloat(summary.tax) * 100 : 0;
 
@@ -172,6 +173,67 @@ export default function BillingDisplay() {
     };
   }, [firestoreData]);
 
+  /* ===================== DYNAMIC TOP CARD (same logic as POS) ===================== */
+  const payView = useMemo(() => {
+    const totals = firestoreData?.totals;
+
+    const totalCents =
+      typeof totals?.totalCents === "number"
+        ? totals.totalCents
+        : computed.grandTotalCents || 0;
+
+    const paidCents =
+      typeof totals?.paidCents === "number" ? totals.paidCents : 0;
+
+    const dueCents =
+      typeof totals?.dueCents === "number"
+        ? Math.max(0, totals.dueCents)
+        : Math.max(0, totalCents - paidCents);
+
+    const changeFromTotals = Math.max(0, paidCents - totalCents);
+
+    const changeCents =
+      (typeof totals?.changeDueCents === "number" && totals.changeDueCents > 0
+        ? totals.changeDueCents
+        : typeof firestoreData?.lastChangeCents === "number" &&
+            firestoreData.lastChangeCents > 0
+          ? firestoreData.lastChangeCents
+          : 0) || changeFromTotals;
+
+    const hasAnyPayment = paidCents > 0 || changeFromTotals > 0;
+
+    const topTitle = !hasAnyPayment
+      ? "Grand Total"
+      : changeCents > 0
+        ? "Change Due"
+        : dueCents > 0
+          ? "Amount Due"
+          : "Grand Total";
+
+    const topAmount = !hasAnyPayment
+      ? formatCentsToDollars(totalCents)
+      : changeCents > 0
+        ? formatCentsToDollars(changeCents)
+        : dueCents > 0
+          ? formatCentsToDollars(dueCents)
+          : formatCentsToDollars(totalCents);
+
+    const bottomTitle = hasAnyPayment ? "Grand Total :" : "Checkout";
+    const bottomAmount = hasAnyPayment ? formatCentsToDollars(totalCents) : "";
+
+    return {
+      totalCents,
+      paidCents,
+      dueCents,
+      changeCents,
+      hasAnyPayment,
+      topTitle,
+      topAmount,
+      bottomTitle,
+      bottomAmount,
+    };
+  }, [firestoreData, computed.grandTotalCents]);
+
   // ------- early returns AFTER hooks -------
   if (loading) {
     return (
@@ -181,7 +243,6 @@ export default function BillingDisplay() {
     );
   }
 
-  // auth error should win if present
   if (authError) {
     return (
       <div className="w-full min-h-screen bg-white flex items-center justify-center">
@@ -320,7 +381,7 @@ export default function BillingDisplay() {
                   <span className="font-semibold">Discount :</span>
                   <span className="font-semibold">
                     {computed.discountCents > 0
-                      ? `-${formatCentsToDollars(computed.discountCents)}`
+                      ? `${formatCentsToDollars(computed.discountCents)}`
                       : "$0.00"}
                   </span>
                 </div>
@@ -342,17 +403,19 @@ export default function BillingDisplay() {
                 </div>
               </div>
 
-              {/* Grand Total card */}
+              {/* DYNAMIC CARD: Grand Total / Amount Due / Change Due */}
               <div className="lg:mt-6 bg-rose-700 text-white rounded-2xl px-6 py-6 text-center shadow-md min-w-60">
                 <div className="text-base font-semibold opacity-95">
-                  Grand Total
+                  {payView.topTitle}
                 </div>
+
                 <div className="mt-2 text-4xl font-semibold tracking-tight">
-                  {formatCentsToDollars(computed.grandTotalCents)}
+                  {payView.topAmount}
                 </div>
 
                 <div className="mt-2 text-base font-semibold opacity-90">
-                  {computed.itemsCount > 0 ? "Grand Total" : "Checkout"}
+                  {payView.bottomTitle}
+                  {payView.bottomAmount ? ` ${payView.bottomAmount}` : ""}
                 </div>
               </div>
 
