@@ -1,12 +1,15 @@
-// src/components/display/BillingDisplay.tsx
 "use client";
 
-import { useState, useEffect } from "react";
-import { doc, onSnapshot } from "firebase/firestore";
+import { useEffect, useMemo, useState } from "react";
+import {
+  doc,
+  onSnapshot,
+  Timestamp,
+  type FirestoreError,
+} from "firebase/firestore";
 import { db } from "@/app/firestore";
 import { useAuth } from "@/hooks/useAuth";
 
-// Interface matching your Firestore data structure
 interface CustomerData {
   appointmentId: string | null;
   email: string;
@@ -53,6 +56,8 @@ interface Totals {
   totalCents: number;
 }
 
+type FsTimestamp = Timestamp | null | undefined;
+
 interface FirestoreData {
   active: boolean;
   customer: CustomerData;
@@ -61,116 +66,133 @@ interface FirestoreData {
   orderId: string | null;
   screen: string;
   signal: string;
-  signalAt: any;
+  signalAt: FsTimestamp;
   status: string;
   summary: Summary;
   totals: Totals;
-  updatedAt: any;
+  updatedAt: FsTimestamp;
 }
 
 export default function BillingDisplay() {
-  const [firestoreData, setFirestoreData] = useState<FirestoreData | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [firestoreData, setFirestoreData] = useState<FirestoreData | null>(
+    null,
+  );
   const [error, setError] = useState<string | null>(null);
-  
+
+  const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
+
   const { tenantId, outletId } = useAuth();
 
+  const authMissing = !tenantId || !outletId;
+  const authError = authMissing
+    ? "Authentication required. TenantId or OutletId missing."
+    : null;
+
   useEffect(() => {
-    if (!tenantId || !outletId) {
-      setError("Authentication required. TenantId or OutletId missing.");
-      setLoading(false);
-      return;
-    }
+    if (!tenantId || !outletId) return;
 
     console.log(`BillingDisplay: Loading data for ${tenantId}/${outletId}`);
-    
+
     const docRef = doc(db, tenantId, outletId);
-    
-    const unsubscribe = onSnapshot(docRef, (docSnap) => {
-      if (docSnap.exists()) {
-        const data = docSnap.data() as FirestoreData;
-        console.log("Billing data received:", {
-          customer: data.customer,
-          itemsCount: data.items?.length || 0,
-          totals: data.totals,
-          active: data.active
-        });
-        setFirestoreData(data);
-        setError(null);
-      } else {
-        console.log("No billing data found for this outlet");
-        setFirestoreData(null);
-      }
-      setLoading(false);
-    }, (err) => {
-      console.error("Error loading billing data:", err);
-      setError("Failed to load billing data");
-      setLoading(false);
-    });
+
+    const unsubscribe = onSnapshot(
+      docRef,
+      (docSnap) => {
+        if (docSnap.exists()) {
+          const data = docSnap.data() as FirestoreData;
+          console.log("Billing data received:", {
+            customer: data.customer,
+            itemsCount: data.items?.length || 0,
+            totals: data.totals,
+            active: data.active,
+          });
+          setFirestoreData(data);
+          setError(null);
+        } else {
+          console.log("No billing data found for this outlet");
+          setFirestoreData(null);
+        }
+
+        setHasLoadedOnce(true);
+      },
+      (err: FirestoreError) => {
+        console.error("Error loading billing data:", err);
+        setError("Failed to load billing data");
+        setHasLoadedOnce(true);
+      },
+    );
 
     return () => unsubscribe();
   }, [tenantId, outletId]);
 
-  // Helper function to format cents to dollars
+  const loading = !authMissing && !hasLoadedOnce;
+
   const formatCentsToDollars = (cents: number): string => {
     return `$${(cents / 100).toFixed(2)}`;
   };
 
-  // Helper function to format string amounts to dollars
-  const formatStringToDollars = (amount: string): string => {
-    const num = parseFloat(amount);
-    return isNaN(num) ? "$0.00" : `$${num.toFixed(2)}`;
-  };
+  const customerName = useMemo(() => {
+    const name = firestoreData?.customer?.name?.trim();
+    return name && name.length > 0 ? name : "Guest";
+  }, [firestoreData?.customer?.name]);
 
-  // Format date from Firestore timestamp
-  const formatDate = (timestamp: any): string => {
-    if (!timestamp) return new Date().toLocaleDateString();
-    
-    try {
-      if (timestamp.toDate) {
-        const date = timestamp.toDate();
-        return date.toLocaleDateString('en-US', {
-          month: '2-digit',
-          day: '2-digit',
-          year: 'numeric'
-        });
-      }
-      return new Date().toLocaleDateString();
-    } catch (error) {
-      return new Date().toLocaleDateString();
-    }
-  };
+  const customerSub = useMemo(() => {
+    const email = firestoreData?.customer?.email?.trim();
+    const phone = firestoreData?.customer?.phone?.trim();
+    return email || phone || "No contact";
+  }, [firestoreData?.customer?.email, firestoreData?.customer?.phone]);
 
-  // Format time from Firestore timestamp
-  const formatTime = (timestamp: any): string => {
-    if (!timestamp) return new Date().toLocaleTimeString();
-    
-    try {
-      if (timestamp.toDate) {
-        const date = timestamp.toDate();
-        return date.toLocaleTimeString('en-US', {
-          hour: '2-digit',
-          minute: '2-digit',
-          hour12: true
-        });
-      }
-      return new Date().toLocaleTimeString();
-    } catch (error) {
-      return new Date().toLocaleTimeString();
-    }
-  };
+  const computed = useMemo(() => {
+    const items = firestoreData?.items || [];
+    const totals = firestoreData?.totals;
+    const summary = firestoreData?.summary;
 
+    const itemsSubtotalCents =
+      items.reduce((sum, it) => sum + (it.lineTotalCents || 0), 0) || 0;
+
+    const subTotalCents = totals?.totalCents || itemsSubtotalCents;
+    const discountCents = totals?.appliedAmountCents || 0;
+
+    const taxCents = summary ? parseFloat(summary.tax) * 100 : 0;
+
+    const tipCents =
+      items.reduce((sum, it) => sum + (it.tipCents || 0), 0) || 0;
+
+    const grandTotalCents = totals?.totalCents || subTotalCents;
+
+    return {
+      items,
+      itemsCount: items.length,
+      subTotalCents,
+      discountCents,
+      taxCents,
+      tipCents,
+      grandTotalCents,
+      updatedAt: firestoreData?.updatedAt,
+    };
+  }, [firestoreData]);
+
+  // ------- early returns AFTER hooks -------
   if (loading) {
     return (
-      <div className="w-full h-full bg-white flex items-center justify-center">
+      <div className="w-full min-h-screen bg-white flex items-center justify-center">
         <div className="text-gray-600 text-lg">Loading billing data...</div>
+      </div>
+    );
+  }
+
+  // auth error should win if present
+  if (authError) {
+    return (
+      <div className="w-full min-h-screen bg-white flex items-center justify-center">
+        <div className="text-red-600 text-lg">{authError}</div>
       </div>
     );
   }
 
   if (error) {
     return (
-      <div className="w-full h-full bg-white flex items-center justify-center">
+      <div className="w-full min-h-screen bg-white flex items-center justify-center">
         <div className="text-red-600 text-lg">{error}</div>
       </div>
     );
@@ -178,119 +200,165 @@ export default function BillingDisplay() {
 
   if (!firestoreData) {
     return (
-      <div className="w-full h-full bg-white flex items-center justify-center">
+      <div className="w-full min-h-screen bg-white flex items-center justify-center">
         <div className="text-gray-600 text-lg">No billing data available</div>
       </div>
     );
   }
 
-  const { customer, items, totals, summary, updatedAt } = firestoreData;
-
-  // Calculate totals from items if needed
-  const itemsSubtotalCents = items?.reduce((sum, item) => sum + (item.lineTotalCents || 0), 0) || 0;
-  
-  // Use totals from Firestore or calculate
-  const subTotalCents = totals?.totalCents || itemsSubtotalCents;
-  const discountCents = totals?.appliedAmountCents || 0;
-  const taxCents = summary ? parseFloat(summary.tax) * 100 : 0;
-  const tipCents = items?.reduce((sum, item) => sum + (item.tipCents || 0), 0) || 0;
-  const grandTotalCents = totals?.totalCents || subTotalCents;
-
   return (
-    <div className="w-full h-full bg-white flex">
+    <div className="w-full flex">
       {/* LEFT PANEL */}
-      <div className="flex-1 p-8 border-r border-gray-200 overflow-hidden">
-        <div className="flex items-start justify-between mb-6">
-          <h1 className="text-4xl font-extrabold text-gray-900">
-            {customer?.name || "Guest Customer"}
-          </h1>
-
-          <div className="text-right text-gray-800">
-            <div className="text-lg font-semibold">{formatDate(updatedAt)}</div>
-            <div className="text-lg font-semibold">{formatTime(updatedAt)}</div>
+      <div className="flex-1 md:p-6 ">
+        {/* Header row */}
+        <div className="flex items-start pb-4">
+          <div className="min-w-0">
+            <div className="text-2xl font-semibold text-gray-900 truncate">
+              {customerName}
+            </div>
+            <div
+              className="mt-1 text-sm text-gray-600 truncate "
+              title={customerSub}
+            >
+              {customerSub}
+            </div>
           </div>
         </div>
 
-        <div className="rounded-xl border border-gray-200 overflow-hidden">
-          <table className="w-full text-base">
-            <thead className="bg-gray-100">
-              <tr className="text-gray-900">
-                <th className="p-4 text-left font-bold w-16">No.</th>
-                <th className="p-4 text-left font-bold">Item</th>
-                <th className="p-4 text-center font-bold w-20">Qty</th>
-                <th className="p-4 text-left font-bold w-40">Provider</th>
-                <th className="p-4 text-right font-bold w-32">Amount</th>
-              </tr>
-            </thead>
+        <div className="flex flex-col lg:flex-row">
+          {/* Table */}
+          <div className="w-full lg:basis-3/4 min-w-0">
+            <div className="mt-4 rounded-md border border-gray-200 overflow-hidden ">
+              <div className="overflow-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="bg-gray-100 text-gray-700">
+                      <th className="px-4 py-3 text-left font-semibold w-16">
+                        No.
+                      </th>
+                      <th className="px-4 py-3 text-left font-semibold">
+                        Item
+                      </th>
+                      <th className="px-4 py-3 text-center font-semibold w-28">
+                        Quantity
+                      </th>
+                      <th className="px-4 py-3 text-left font-semibold w-40">
+                        Provider
+                      </th>
+                      <th className="px-4 py-3 text-right font-semibold w-32">
+                        Amount
+                      </th>
+                    </tr>
+                  </thead>
 
-            <tbody className="text-gray-900">
-              {items && items.length > 0 ? (
-                items.map((item, index) => (
-                  <tr key={item.id || index} className="border-t border-gray-100">
-                    <td className="p-4">{index + 1}</td>
-                    <td className="p-4 font-semibold">{item.name}</td>
-                    <td className="p-4 text-center">{item.qty || 1}</td>
-                    <td className="p-4">{item.staffName || "Staff"}</td>
-                    <td className="p-4 text-right font-semibold">
-                      {formatCentsToDollars(item.lineTotalCents || 0)}
-                    </td>
-                  </tr>
-                ))
-              ) : (
-                <tr>
-                  <td colSpan={5} className="p-8 text-center text-gray-500">
-                    No items in this order
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
+                  <tbody className="text-gray-900">
+                    {computed.items.length > 0 ? (
+                      computed.items.map((item, index) => (
+                        <tr
+                          key={item.id || index}
+                          className="border-t border-gray-200"
+                        >
+                          <td className="px-4 py-3">{index + 1}.</td>
 
-      {/* RIGHT PANEL */}
-      <div className="w-[420px] p-8 flex flex-col justify-between">
-        <div>
-          <h2 className="text-3xl font-extrabold text-center text-gray-900 mb-8">
-            {items?.length || 0} {items?.length === 1 ? "Item" : "Items"}
-          </h2>
+                          <td className="px-4 py-3">
+                            <div className="font-medium">{item.name}</div>
+                          </td>
 
-          <div className="space-y-4 text-lg text-gray-900">
-            <div className="flex justify-between">
-              <span className="font-semibold">Sub Total</span>
-              <span className="font-bold">{formatCentsToDollars(subTotalCents)}</span>
-            </div>
+                          <td className="px-4 py-3 text-center">
+                            {item.qty || 1}
+                          </td>
 
-            {discountCents > 0 && (
-              <div className="flex justify-between">
-                <span className="font-semibold">Discount</span>
-                <span className="font-bold text-green-600">
-                  -{formatCentsToDollars(discountCents)}
-                </span>
+                          <td className="px-4 py-3">
+                            {item.staffName || "Staff"}
+                          </td>
+
+                          <td className="px-4 py-3 text-right font-medium">
+                            {formatCentsToDollars(item.lineTotalCents || 0)}
+                          </td>
+                        </tr>
+                      ))
+                    ) : (
+                      <tr>
+                        <td colSpan={5} className="px-4 py-10 text-center">
+                          <div className="text-gray-500">
+                            No items in session
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
               </div>
-            )}
-
-            <div className="flex justify-between">
-              <span className="font-semibold">Taxes</span>
-              <span className="font-bold">{formatCentsToDollars(taxCents)}</span>
             </div>
-
-            {tipCents > 0 && (
-              <div className="flex justify-between">
-                <span className="font-semibold">Tip</span>
-                <span className="font-bold">{formatCentsToDollars(tipCents)}</span>
-              </div>
-            )}
           </div>
-        </div>
 
-        <div className="bg-red-600 text-white rounded-3xl p-10 text-center shadow-lg">
-          <p className="text-lg font-semibold tracking-wide">Grand Total</p>
-          <p className="text-6xl font-extrabold mt-3">
-            {formatCentsToDollars(grandTotalCents)}
-          </p>
-          
-          
+          <div className="hidden lg:block border-r border-gray-200 mx-6" />
+
+          {/* RIGHT PANEL */}
+          <div className="lg:basis-1/4 min-w-70 py-6">
+            <div className="h-full flex flex-col md:flex-row lg:flex-col gap-9 justify-between items-center">
+              {/* Items count */}
+              <div className="flex flex-col items-center lg:pt-2">
+                <div className="text-3xl font-normal text-rose-700 leading-none">
+                  {computed.itemsCount}
+                </div>
+                <div className="text-xl  font-semibold text-gray-900 mt-1">
+                  Items
+                </div>
+              </div>
+
+              {/* Breakdown */}
+              <div className="lg:mt-6 space-y-2 text-base text-gray-900 min-w-72 px-3">
+                <div className="flex justify-between">
+                  <span className="font-semibold">Sub Total :</span>
+                  <span className="font-semibold">
+                    {formatCentsToDollars(computed.subTotalCents)}
+                  </span>
+                </div>
+
+                <div className="flex justify-between">
+                  <span className="font-semibold">Discount :</span>
+                  <span className="font-semibold">
+                    {computed.discountCents > 0
+                      ? `-${formatCentsToDollars(computed.discountCents)}`
+                      : "$0.00"}
+                  </span>
+                </div>
+
+                <div className="flex justify-between">
+                  <span className="font-semibold">Taxes :</span>
+                  <span className="font-semibold">
+                    {formatCentsToDollars(computed.taxCents)}
+                  </span>
+                </div>
+
+                <div className="flex justify-between items-center">
+                  <span className="font-semibold flex items-center gap-1">
+                    Tip <span className="text-gray-500">ⓘ</span>
+                  </span>
+                  <span className="font-semibold">
+                    {formatCentsToDollars(computed.tipCents)}
+                  </span>
+                </div>
+              </div>
+
+              {/* Grand Total card */}
+              <div className="lg:mt-6 bg-rose-700 text-white rounded-2xl px-6 py-6 text-center shadow-md min-w-60">
+                <div className="text-base font-semibold opacity-95">
+                  Grand Total
+                </div>
+                <div className="mt-2 text-4xl font-semibold tracking-tight">
+                  {formatCentsToDollars(computed.grandTotalCents)}
+                </div>
+
+                <div className="mt-2 text-base font-semibold opacity-90">
+                  {computed.itemsCount > 0 ? "Grand Total" : "Checkout"}
+                </div>
+              </div>
+
+              {/* <div className="h-1" /> */}
+            </div>
+          </div>
         </div>
       </div>
     </div>

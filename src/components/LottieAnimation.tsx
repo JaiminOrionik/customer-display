@@ -10,7 +10,7 @@ export default function LottieAnimation() {
       animationData={makeupArtistAnim}
       loop={true}
       autoplay={true}
-      className="w-full h-[520px] xl:h-[700px]"
+      className="w-full h-130 xl:h-175"
       rendererSettings={{
         preserveAspectRatio: 'xMidYMid slice'
       }}
