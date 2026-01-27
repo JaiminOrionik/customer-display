@@ -38,6 +38,7 @@ export default function Home() {
     useWebSocket({ token, tenantId });
 
   // Function to filter today's appointments
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const filterTodaysAppointments = useCallback((appointments: any[]) => {
     if (!Array.isArray(appointments)) return [];
     
@@ -214,7 +215,6 @@ export default function Home() {
         connectionStatus={connectionStatus}
         currentTime={currentTime}
         currentOutletId={outletId}
-        // Show today's appointment count
         appointmentCount={todaysRows.length}
         onReconnect={handleReconnect}
         displayMode={displayMode}
