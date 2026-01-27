@@ -27,11 +27,6 @@ export default function DashboardHeader({
   currentOutletId,
   appointmentCount,
   onReconnect,
-
-  displayMode,
-  onChangeDisplay,
-  isUpdatingStatus,
-  isActive,
 }: DashboardHeaderProps) {
   return (
     <header className="flex items-center justify-between px-4 sm:px-6 py-4 border-b border-slate-200 bg-white sticky top-0 z-40">
