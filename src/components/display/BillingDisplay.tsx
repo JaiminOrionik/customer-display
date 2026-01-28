@@ -28,7 +28,7 @@ interface Item {
   itemId: string;
   name: string;
   staffId: string | null;
-  staffName: string | null;
+  serviceProvider: string | null;
   qty: number;
   unitPriceCents: number;
   tipCents: number;
@@ -300,11 +300,14 @@ export default function BillingDisplay() {
                       <th className="px-4 py-3 text-left font-semibold">
                         Item
                       </th>
+                      <th className="px-4 py-3 text-left font-semibold w-40">
+                        Provider
+                      </th>
                       <th className="px-4 py-3 text-center font-semibold w-28">
                         Quantity
                       </th>
-                      <th className="px-4 py-3 text-left font-semibold w-40">
-                        Provider
+                      <th className="px-4 py-3 text-right font-semibold w-32">
+                        Price
                       </th>
                       <th className="px-4 py-3 text-right font-semibold w-32">
                         Amount
@@ -320,19 +323,18 @@ export default function BillingDisplay() {
                           className="border-t border-gray-200"
                         >
                           <td className="px-4 py-3">{index + 1}.</td>
-
                           <td className="px-4 py-3">
                             <div className="font-medium">{item.name}</div>
                           </td>
-
+                          <td className="px-4 py-3">
+                            {item.serviceProvider || "-"}
+                          </td>
                           <td className="px-4 py-3 text-center">
                             {item.qty || 1}
                           </td>
-
-                          <td className="px-4 py-3">
-                            {item.staffName || "Staff"}
+                          <td className="px-4 py-3 text-right font-medium">
+                            {formatCentsToDollars(item.unitPriceCents || 0)}
                           </td>
-
                           <td className="px-4 py-3 text-right font-medium">
                             {formatCentsToDollars(item.lineTotalCents || 0)}
                           </td>
