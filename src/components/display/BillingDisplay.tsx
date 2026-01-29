@@ -362,7 +362,7 @@ export default function BillingDisplay() {
             <div className="h-full flex flex-col md:flex-row lg:flex-col gap-9 justify-between items-center">
               {/* Items count */}
               <div className="flex flex-col items-center lg:pt-2">
-                <div className="text-3xl font-normal text-rose-700 leading-none">
+                <div className="text-3xl font-normal text-red-700 leading-none">
                   {computed.itemsCount}
                 </div>
                 <div className="text-xl  font-semibold text-gray-900 mt-1">
@@ -406,7 +406,7 @@ export default function BillingDisplay() {
               </div>
 
               {/* DYNAMIC CARD: Grand Total / Amount Due / Change Due */}
-              <div className="lg:mt-6 bg-rose-700 text-white rounded-2xl px-6 py-6 text-center shadow-md min-w-60">
+              <div className="lg:mt-6 bg-red-700 text-white rounded-2xl px-6 py-6 text-center shadow-md min-w-60">
                 <div className="text-base font-semibold opacity-95">
                   {payView.topTitle}
                 </div>

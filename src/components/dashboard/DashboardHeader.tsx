@@ -50,7 +50,7 @@ export default function DashboardHeader({
             {!isConnected && (
               <button
                 onClick={onReconnect}
-                className="text-xs px-2 py-1 text-rose-600 bg-slate-100 rounded hover:bg-slate-200"
+                className="text-xs px-2 py-1 text-red-600 bg-slate-100 rounded hover:bg-slate-200"
               >
                 Reconnect
               </button>
