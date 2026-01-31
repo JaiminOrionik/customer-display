@@ -12,34 +12,48 @@ import {
 import { db } from "@/app/firestore";
 import { useAuth } from "@/hooks/useAuth";
 
-export type EnforcementValue =
-  | "DRAW_SIGNATURE"
-  | "TYPED_NAME"
-  | "CHECKBOX_ONLY";
+export type EnforcementValue = "DRAW_SIGNATURE" | "TYPED_NAME" | "CHECKBOX_ONLY";
 
 type ConsentResponseStatus = "CONFIRMED" | "CANCELED";
 
 type ConsentSubmitPayload = {
+  tenantId?: string;
+  outletId?: string;
+  staffId?: string;
+  appointmentId?: string;
+  customerId?: string;
   serviceId?: string;
   formId?: string;
+  concentFormId?: string;
   enforcement: EnforcementValue;
+  signatureType?: "TYPED_NAME" | "CHECKBOX_ONLY" | "SIGNATURE_IMAGE";
   heading: string;
   consent: string;
   typedName?: string;
-  accepted?: boolean;
-  signatureDataUrl?: string;
+  accepted?: boolean; 
+  isChecked?: boolean;
+  signatureDataUrl?: string; 
+  imageUrl?: string;
   emailMe?: boolean;
+  channel?: string;
   submittedAt: string;
 };
 
 type ConsentRequest = {
   channelId: string;
   status: "IDLE" | "PENDING";
+
   tenantId: string;
   outletId: string;
   staffId?: string;
+
+  appointmentId?: string;
+  customerId?: string;
+  channel?: string;
+
   serviceId: string;
   serviceName?: string;
+
   formId: string;
   heading: string;
   consent: string;
@@ -124,6 +138,11 @@ export default function ConsentPage() {
           tenantId: String(data?.tenantId || ""),
           outletId: String(data?.outletId || ""),
           staffId: data?.staffId ? String(data.staffId) : undefined,
+
+          appointmentId: data?.appointmentId ? String(data.appointmentId) : undefined,
+          customerId: data?.customerId ? String(data.customerId) : undefined,
+          channel: data?.channel ? String(data.channel) : undefined,
+
           serviceId: String(data?.serviceId || ""),
           serviceName: data?.serviceName ? String(data.serviceName) : "",
           formId: String(data?.formId || ""),
@@ -136,7 +155,7 @@ export default function ConsentPage() {
         console.error("❌ Consent request listen failed:", err);
         setFsError(err.message || "Failed to listen consent request");
         setReq(null);
-      },
+      }
     );
 
     return () => unsub();
@@ -144,7 +163,7 @@ export default function ConsentPage() {
 
   const enforcement = useMemo<EnforcementValue>(
     () => req?.enforcement || "TYPED_NAME",
-    [req],
+    [req]
   );
   const heading = useMemo(() => req?.heading || DEFAULT_HEADING, [req]);
   const consent = useMemo(() => req?.consent || DEFAULT_CONSENT, [req]);
@@ -181,24 +200,50 @@ export default function ConsentPage() {
 
   const payload: ConsentSubmitPayload = useMemo(() => {
     const base: ConsentSubmitPayload = {
+      tenantId: req?.tenantId || String(tenantId || ""),
+      outletId: req?.outletId || String(outletId || ""),
+      staffId: req?.staffId,
+
+      appointmentId: req?.appointmentId,
+      customerId: req?.customerId,
+
       serviceId: serviceId || undefined,
+
       formId: formId || undefined,
+      concentFormId: formId || undefined,
+
       enforcement,
       heading: heading || DEFAULT_HEADING,
       consent: consent || DEFAULT_CONSENT,
+
+      channel: req?.channel || "POS",
+
       submittedAt: new Date().toISOString(),
     };
 
-    if (enforcement === "TYPED_NAME")
+    if (enforcement === "TYPED_NAME") {
+      base.signatureType = "TYPED_NAME";
       base.typedName = typedName.trim() || undefined;
-    if (enforcement === "CHECKBOX_ONLY") base.accepted = accepted;
+    }
+
+    if (enforcement === "CHECKBOX_ONLY") {
+      base.signatureType = "CHECKBOX_ONLY";
+      base.accepted = accepted;
+      base.isChecked = accepted; 
+    }
+
     if (enforcement === "DRAW_SIGNATURE") {
-      base.signatureDataUrl = signature || undefined;
+      base.signatureType = "SIGNATURE_IMAGE";
+      base.signatureDataUrl = signature || undefined; 
+      base.imageUrl = signature || undefined;
       base.emailMe = emailMe;
     }
 
     return stripUndefinedDeep(base);
   }, [
+    req,
+    tenantId,
+    outletId,
     serviceId,
     formId,
     enforcement,
@@ -211,8 +256,8 @@ export default function ConsentPage() {
   ]);
 
   const writeResponse = async (
-    status: "CONFIRMED" | "CANCELED",
-    data?: ConsentSubmitPayload,
+    status: ConsentResponseStatus,
+    data?: ConsentSubmitPayload
   ) => {
     if (!channelId) return;
 
@@ -230,7 +275,7 @@ export default function ConsentPage() {
     await setDoc(
       doc(db, "pos_consent_requests", channelId),
       { status: "IDLE", updatedAt: serverTimestamp() },
-      { merge: true },
+      { merge: true }
     );
   };
 
@@ -253,13 +298,40 @@ export default function ConsentPage() {
     setErrorMsg("");
     try {
       await writeResponse("CANCELED", {
+        tenantId: req?.tenantId || String(tenantId || ""),
+        outletId: req?.outletId || String(outletId || ""),
+        staffId: req?.staffId,
+
+        appointmentId: req?.appointmentId,
+        customerId: req?.customerId,
+
         serviceId: serviceId || undefined,
         formId: formId || undefined,
+        concentFormId: formId || undefined,
+
         enforcement,
+        signatureType:
+          enforcement === "DRAW_SIGNATURE"
+            ? "SIGNATURE_IMAGE"
+            : enforcement === "CHECKBOX_ONLY"
+              ? "CHECKBOX_ONLY"
+              : "TYPED_NAME",
+
         heading: heading || DEFAULT_HEADING,
         consent: consent || DEFAULT_CONSENT,
+
+        accepted: enforcement === "CHECKBOX_ONLY" ? accepted : undefined,
+        isChecked: enforcement === "CHECKBOX_ONLY" ? accepted : undefined,
+
+        signatureDataUrl: enforcement === "DRAW_SIGNATURE" ? signature || undefined : undefined,
+        imageUrl: enforcement === "DRAW_SIGNATURE" ? signature || undefined : undefined,
+        emailMe: enforcement === "DRAW_SIGNATURE" ? emailMe : undefined,
+
+        channel: req?.channel || "POS",
+
         submittedAt: new Date().toISOString(),
       });
+
       setSubmitted(false);
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } catch (e: any) {
@@ -288,9 +360,7 @@ export default function ConsentPage() {
         <div className="max-w-xl w-full rounded-2xl bg-red-50 border border-red-200 p-6 text-center">
           <h1 className="text-lg font-bold text-red-700">Firestore error</h1>
           <p className="mt-2 text-sm text-red-700">{fsError}</p>
-          <p className="mt-2 text-xs text-neutral-600">
-            channelId: {channelId}
-          </p>
+          <p className="mt-2 text-xs text-neutral-600">channelId: {channelId}</p>
         </div>
       </div>
     );
@@ -371,10 +441,7 @@ export default function ConsentPage() {
                       <label className="block text-sm font-semibold text-neutral-800 mb-2">
                         Sign Here
                       </label>
-                      <SignaturePad
-                        height={120}
-                        onChangeDataUrl={setSignature}
-                      />
+                      <SignaturePad height={120} onChangeDataUrl={setSignature} />
                     </div>
 
                     <div className="md:col-span-1 flex md:justify-center">
@@ -385,9 +452,7 @@ export default function ConsentPage() {
                           onChange={(e) => setEmailMe(e.target.checked)}
                           className="h-4 w-4 accent-[#D7263D]"
                         />
-                        <span className="text-sm text-neutral-800">
-                          Email me
-                        </span>
+                        <span className="text-sm text-neutral-800">Email me</span>
                       </label>
                     </div>
 
@@ -434,14 +499,6 @@ export default function ConsentPage() {
               Consent submitted successfully.
             </div>
           ) : null}
-
-          {/* {(serviceId || formId) && (
-            <div className="text-xs text-neutral-500">
-              {serviceId ? <span>serviceId: {serviceId}</span> : null}
-              {serviceId && formId ? <span className="mx-2">•</span> : null}
-              {formId ? <span>formId: {formId}</span> : null}
-            </div>
-          )} */}
         </div>
       </div>
     </div>
