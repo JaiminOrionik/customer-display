@@ -4,7 +4,7 @@ import Image from "next/image";
 import LogoutButton from "@/components/LogoutButton";
 import logo from "../../assets/logo/AaravPOS-Logo_SVG 1.svg";
 
-type DisplayMode = "QUEUE" | "BILLING";
+type DisplayMode = "QUEUE" | "BILLING" | "CONSENT";
 
 interface DashboardHeaderProps {
   isConnected: boolean;
@@ -73,32 +73,6 @@ export default function DashboardHeader({
         <div className="hidden sm:block text-sm text-slate-600">
           {appointmentCount} appointments
         </div>
-
-        {/* toggle buttons - calls existing handler, same business logic */}
-        {/* <div className="flex items-center gap-2">
-          <button
-            disabled={isUpdatingStatus}
-            onClick={() => onChangeDisplay("QUEUE")}
-            className={`text-xs px-3 py-2 rounded border ${
-              displayMode === "QUEUE"
-                ? "bg-slate-900 text-white border-slate-900"
-                : "bg-white text-slate-700 border-slate-200"
-            } ${isUpdatingStatus ? "opacity-60 cursor-not-allowed" : ""}`}
-          >
-            Queue
-          </button>
-          <button
-            disabled={isUpdatingStatus}
-            onClick={() => onChangeDisplay("BILLING")}
-            className={`text-xs px-3 py-2 rounded border ${
-              displayMode === "BILLING"
-                ? "bg-slate-900 text-white border-slate-900"
-                : "bg-white text-slate-700 border-slate-200"
-            } ${isUpdatingStatus ? "opacity-60 cursor-not-allowed" : ""}`}
-          >
-            Billing
-          </button>
-        </div> */}
 
         <LogoutButton />
       </div>

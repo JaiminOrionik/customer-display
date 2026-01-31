@@ -116,11 +116,9 @@ export default function SignaturePad({ height = 120, onChangeDataUrl }: Signatur
     const ctx = c.getContext("2d");
     if (!ctx) return;
 
-    // clear full internal buffer
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, c.width, c.height);
 
-    // restore transform so drawing remains correct
     resizeToDevice();
     onChangeDataUrl?.("");
   };

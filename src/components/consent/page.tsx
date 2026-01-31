@@ -1,13 +1,18 @@
 "use client";
 
 import React, { useEffect, useMemo, useState } from "react";
-import { useSearchParams } from "next/navigation";
 import SignaturePad from "./SignaturePad";
+import {
+  doc,
+  onSnapshot,
+  setDoc,
+  serverTimestamp,
+  type FirestoreError,
+} from "firebase/firestore";
+import { db } from "@/app/firestore";
+import { useAuth } from "@/hooks/useAuth";
 
-export type EnforcementValue =
-  | "DRAW_SIGNATURE"
-  | "TYPED_NAME"
-  | "CHECKBOX_ONLY";
+export type EnforcementValue = "DRAW_SIGNATURE" | "TYPED_NAME" | "CHECKBOX_ONLY";
 
 type ConsentSubmitPayload = {
   serviceId?: string;
@@ -22,46 +27,101 @@ type ConsentSubmitPayload = {
   submittedAt: string;
 };
 
-const DEFAULT_HEADING = "Consent Form Title";
+type ConsentRequest = {
+  channelId: string;
+  status: "IDLE" | "PENDING";
+  tenantId: string;
+  outletId: string;
+  staffId?: string;
+  serviceId: string;
+  formId: string;
+  heading: string;
+  consent: string;
+  enforcement: EnforcementValue;
+};
+
+const DEFAULT_HEADING = "Consent";
 const DEFAULT_CONSENT =
   "I confirm that I have read and understood the details of the service being provided.\n\nBy proceeding, I provide my consent to receive the service.";
 
-function safeParam(sp: URLSearchParams, key: string, fallback = "") {
-  const v = sp.get(key);
-  return (v ?? fallback).toString();
-}
-
-function isEnforcement(v: string | null): v is EnforcementValue {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function isEnforcement(v: any): v is EnforcementValue {
   return v === "TYPED_NAME" || v === "CHECKBOX_ONLY" || v === "DRAW_SIGNATURE";
 }
 
+function makeChannelId(tenantId: string, outletId: string) {
+  return `${tenantId}_${outletId}_any`;
+}
+
 export default function ConsentPage() {
-  const searchParams = useSearchParams();
+  const { tenantId, outletId } = useAuth();
 
-  const enforcement = useMemo<EnforcementValue>(() => {
-    const raw = searchParams.get("enforcement");
-    if (isEnforcement(raw)) return raw;
-    return "TYPED_NAME";
-  }, [searchParams]);
+  const channelId = useMemo(() => {
+    if (!tenantId || !outletId) return "";
+    return makeChannelId(String(tenantId), String(outletId));
+  }, [tenantId, outletId]);
 
-  const heading = useMemo(
-    () => safeParam(searchParams, "heading", DEFAULT_HEADING),
-    [searchParams],
-  );
+  const [req, setReq] = useState<ConsentRequest | null>(null);
+  const [fsError, setFsError] = useState("");
 
-  const consent = useMemo(
-    () => safeParam(searchParams, "consent", DEFAULT_CONSENT),
-    [searchParams],
-  );
+  useEffect(() => {
+    if (!channelId) return;
 
-  const serviceId = useMemo(
-    () => safeParam(searchParams, "serviceId", ""),
-    [searchParams],
+    const ref = doc(db, "pos_consent_requests", channelId);
+
+    const unsub = onSnapshot(
+      ref,
+      (snap) => {
+        setFsError("");
+
+        if (!snap.exists()) {
+          setReq(null);
+          return;
+        }
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const data: any = snap.data();
+
+        if (data?.status !== "PENDING") {
+          setReq(null);
+          return;
+        }
+
+        const enforcement: EnforcementValue = isEnforcement(data?.enforcement)
+          ? data.enforcement
+          : "TYPED_NAME";
+
+        setReq({
+          channelId,
+          status: "PENDING",
+          tenantId: String(data?.tenantId || ""),
+          outletId: String(data?.outletId || ""),
+          staffId: data?.staffId ? String(data.staffId) : undefined,
+          serviceId: String(data?.serviceId || ""),
+          formId: String(data?.formId || ""),
+          heading: String(data?.heading || DEFAULT_HEADING),
+          consent: String(data?.consent || DEFAULT_CONSENT),
+          enforcement,
+        });
+      },
+      (err: FirestoreError) => {
+        console.error("❌ Consent request listen failed:", err);
+        setFsError(err.message || "Failed to listen consent request");
+        setReq(null);
+      },
+    );
+
+    return () => unsub();
+  }, [channelId]);
+
+  const enforcement = useMemo<EnforcementValue>(
+    () => req?.enforcement || "TYPED_NAME",
+    [req],
   );
-  const formId = useMemo(
-    () => safeParam(searchParams, "formId", ""),
-    [searchParams],
-  );
+  const heading = useMemo(() => req?.heading || DEFAULT_HEADING, [req]);
+  const consent = useMemo(() => req?.consent || DEFAULT_CONSENT, [req]);
+  const serviceId = useMemo(() => req?.serviceId || "", [req]);
+  const formId = useMemo(() => req?.formId || "", [req]);
 
   const [typedName, setTypedName] = useState("");
   const [accepted, setAccepted] = useState(false);
@@ -72,7 +132,6 @@ export default function ConsentPage() {
   const [submitted, setSubmitted] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
 
-  // Reset on enforcement or content change (same behavior as your modal)
   useEffect(() => {
     setTypedName("");
     setAccepted(false);
@@ -81,15 +140,16 @@ export default function ConsentPage() {
     setSubmitting(false);
     setSubmitted(false);
     setErrorMsg("");
-  }, [enforcement, heading, consent]);
+  }, [enforcement, heading, consent, serviceId, formId]);
 
   const canConfirm = useMemo(() => {
+    if (!req) return false;
     if (submitted) return false;
     if (enforcement === "TYPED_NAME") return typedName.trim().length > 0;
     if (enforcement === "CHECKBOX_ONLY") return accepted;
     if (enforcement === "DRAW_SIGNATURE") return Boolean(signature);
     return false;
-  }, [enforcement, typedName, accepted, signature, submitted]);
+  }, [req, enforcement, typedName, accepted, signature, submitted]);
 
   const payload: ConsentSubmitPayload = useMemo(
     () => ({
@@ -104,47 +164,40 @@ export default function ConsentPage() {
       emailMe,
       submittedAt: new Date().toISOString(),
     }),
-    [
-      serviceId,
-      formId,
-      enforcement,
-      heading,
-      consent,
-      typedName,
-      accepted,
-      signature,
-      emailMe,
-    ],
+    [serviceId, formId, enforcement, heading, consent, typedName, accepted, signature, emailMe],
   );
 
-  const notifyStaffScreen = (data: ConsentSubmitPayload) => {
-    // staff/admin display can listen to window message
-    try {
-      window.postMessage({ type: "CONSENT_SUBMITTED", payload: data }, "*");
-    } catch {}
-  };
+  const writeResponse = async (
+    status: "SUBMITTED" | "CANCELLED",
+    data?: ConsentSubmitPayload,
+  ) => {
+    if (!channelId) return;
+    const ref = doc(db, "pos_consent_responses", channelId);
 
-  const submitToApi = async (data: ConsentSubmitPayload) => {
-    // Optional API call
-    const res = await fetch("/api/consent/submit", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(data),
-    });
-    if (!res.ok) {
-      const t = await res.text().catch(() => "");
-      throw new Error(t || "Failed to submit consent");
-    }
+    await setDoc(
+      ref,
+      {
+        channelId,
+        status,
+        ...(data || {}),
+        serverSubmittedAt: serverTimestamp(),
+      },
+      { merge: true },
+    );
+
+    await setDoc(
+      doc(db, "pos_consent_requests", channelId),
+      { status: "IDLE", updatedAt: serverTimestamp() },
+      { merge: true },
+    );
   };
 
   const onConfirm = async () => {
     if (!canConfirm) return;
     setSubmitting(true);
     setErrorMsg("");
-
     try {
-      notifyStaffScreen(payload);
-      await submitToApi(payload);
+      await writeResponse("SUBMITTED", payload);
       setSubmitted(true);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Something went wrong";
@@ -154,51 +207,85 @@ export default function ConsentPage() {
     }
   };
 
-  const onCancel = () => {
-    try {
-      window.postMessage(
-        {
-          type: "CONSENT_CANCELLED",
-          payload: {
-            serviceId: serviceId || undefined,
-            formId: formId || undefined,
-            enforcement,
-            submittedAt: new Date().toISOString(),
-          },
-        },
-        "*",
-      );
-    } catch {}
-
-    // clear inputs
-    setTypedName("");
-    setAccepted(false);
-    setSignature("");
-    setEmailMe(false);
+  const onCancel = async () => {
+    setSubmitting(true);
     setErrorMsg("");
+    try {
+      await writeResponse("CANCELLED", {
+        serviceId: serviceId || undefined,
+        formId: formId || undefined,
+        enforcement,
+        heading: heading || DEFAULT_HEADING,
+        consent: consent || DEFAULT_CONSENT,
+        submittedAt: new Date().toISOString(),
+      });
+      setSubmitted(false);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } catch (e: any) {
+      setErrorMsg(e?.message || "Cancel failed");
+    } finally {
+      setSubmitting(false);
+    }
   };
 
+  if (!tenantId || !outletId) {
+    return (
+      <div className="min-h-screen w-full bg-white flex items-center justify-center p-6">
+        <div className="max-w-xl w-full rounded-2xl bg-[#EEEEEE] p-6 text-center">
+          <h1 className="text-lg font-bold text-neutral-900">Auth missing</h1>
+          <p className="mt-2 text-sm text-neutral-600">
+            tenantId/outletId not available from token.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  if (fsError) {
+    return (
+      <div className="min-h-screen w-full bg-white flex items-center justify-center p-6">
+        <div className="max-w-xl w-full rounded-2xl bg-red-50 border border-red-200 p-6 text-center">
+          <h1 className="text-lg font-bold text-red-700">Firestore error</h1>
+          <p className="mt-2 text-sm text-red-700">{fsError}</p>
+          <p className="mt-2 text-xs text-neutral-600">channelId: {channelId}</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!req) {
+    return (
+      <div className="min-h-screen w-full bg-white flex items-center justify-center p-6">
+        <div className="max-w-xl w-full rounded-2xl bg-[#EEEEEE] p-6 text-center">
+          <h1 className="text-lg font-bold text-neutral-900">
+            Waiting for consent…
+          </h1>
+          <p className="mt-2 text-sm text-neutral-600">
+            POS screen will send a consent request when a service requires it.
+          </p>
+          <p className="mt-3 text-xs text-neutral-500">
+            Listening doc: pos_consent_requests/{channelId}
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className="min-h-screen w-full bg-white flex items-center justify-center p-4">
-      {/* Grey Outer Container (Figma style) */}
+    <div className="min-h-full w-full bg-white flex items-center justify-center p-4">
       <div className="w-full max-w-5xl rounded-[28px] bg-[#EEEEEE] p-5 sm:p-6 shadow-sm">
-        {/* Title */}
         <div className="text-center mb-4">
           <h1 className="text-lg sm:text-xl font-bold text-neutral-900">
-            {heading || DEFAULT_HEADING}
+            {heading}
           </h1>
         </div>
 
-        {/* White Scroll Consent Box */}
         <div className="rounded-[18px] border border-neutral-200 bg-white p-4 sm:p-5 max-h-[360px] overflow-y-auto whitespace-pre-line text-[13px] leading-6 text-neutral-700">
-          {consent || DEFAULT_CONSENT}
+          {consent}
         </div>
 
-        {/* Bottom Area */}
         <div className="mt-5 flex flex-col gap-4">
-          {/* INPUT ROW (left) + BUTTONS (right) */}
           <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4">
-            {/* LEFT AREA (changes per enforcement) */}
             <div className="flex-1">
               {enforcement === "TYPED_NAME" && (
                 <div className="max-w-md">
@@ -231,18 +318,13 @@ export default function ConsentPage() {
               {enforcement === "DRAW_SIGNATURE" && (
                 <div className="w-full">
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-4 items-end">
-                    {/* Signature */}
                     <div className="md:col-span-1">
                       <label className="block text-sm font-semibold text-neutral-800 mb-2">
                         Sign Here
                       </label>
-                      <SignaturePad
-                        height={120}
-                        onChangeDataUrl={(d) => setSignature(d)}
-                      />
+                      <SignaturePad height={120} onChangeDataUrl={setSignature} />
                     </div>
 
-                    {/* Email me (center) */}
                     <div className="md:col-span-1 flex md:justify-center">
                       <label className="inline-flex items-center gap-3 select-none">
                         <input
@@ -251,20 +333,16 @@ export default function ConsentPage() {
                           onChange={(e) => setEmailMe(e.target.checked)}
                           className="h-4 w-4 accent-[#D7263D]"
                         />
-                        <span className="text-sm text-neutral-800">
-                          Email me
-                        </span>
+                        <span className="text-sm text-neutral-800">Email me</span>
                       </label>
                     </div>
 
-                    {/* Spacer */}
                     <div className="hidden md:block md:col-span-1" />
                   </div>
                 </div>
               )}
             </div>
 
-            {/* RIGHT: Buttons (bottom-right like figma) */}
             <div className="flex items-center justify-end gap-3">
               <button
                 type="button"
@@ -291,7 +369,6 @@ export default function ConsentPage() {
             </div>
           </div>
 
-          {/* Error / Success line (optional) */}
           {errorMsg ? (
             <div className="rounded-xl bg-red-50 border border-red-200 px-4 py-2 text-sm text-red-700">
               {errorMsg}
@@ -304,7 +381,6 @@ export default function ConsentPage() {
             </div>
           ) : null}
 
-          {/* Optional debug */}
           {(serviceId || formId) && (
             <div className="text-xs text-neutral-500">
               {serviceId ? <span>serviceId: {serviceId}</span> : null}
