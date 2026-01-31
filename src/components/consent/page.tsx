@@ -12,7 +12,12 @@ import {
 import { db } from "@/app/firestore";
 import { useAuth } from "@/hooks/useAuth";
 
-export type EnforcementValue = "DRAW_SIGNATURE" | "TYPED_NAME" | "CHECKBOX_ONLY";
+export type EnforcementValue =
+  | "DRAW_SIGNATURE"
+  | "TYPED_NAME"
+  | "CHECKBOX_ONLY";
+
+type ConsentResponseStatus = "CONFIRMED" | "CANCELED";
 
 type ConsentSubmitPayload = {
   serviceId?: string;
@@ -34,6 +39,7 @@ type ConsentRequest = {
   outletId: string;
   staffId?: string;
   serviceId: string;
+  serviceName?: string;
   formId: string;
   heading: string;
   consent: string;
@@ -52,6 +58,27 @@ function isEnforcement(v: any): v is EnforcementValue {
 function makeChannelId(tenantId: string, outletId: string) {
   return `${tenantId}_${outletId}_any`;
 }
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const stripUndefinedDeep = (val: any): any => {
+  if (val === undefined) return undefined;
+
+  if (Array.isArray(val)) {
+    return val.map(stripUndefinedDeep).filter((x) => x !== undefined);
+  }
+
+  if (val && typeof val === "object") {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const out: any = {};
+    Object.keys(val).forEach((k) => {
+      const v = stripUndefinedDeep(val[k]);
+      if (v !== undefined) out[k] = v;
+    });
+    return out;
+  }
+
+  return val;
+};
 
 export default function ConsentPage() {
   const { tenantId, outletId } = useAuth();
@@ -98,6 +125,7 @@ export default function ConsentPage() {
           outletId: String(data?.outletId || ""),
           staffId: data?.staffId ? String(data.staffId) : undefined,
           serviceId: String(data?.serviceId || ""),
+          serviceName: data?.serviceName ? String(data.serviceName) : "",
           formId: String(data?.formId || ""),
           heading: String(data?.heading || DEFAULT_HEADING),
           consent: String(data?.consent || DEFAULT_CONSENT),
@@ -151,39 +179,53 @@ export default function ConsentPage() {
     return false;
   }, [req, enforcement, typedName, accepted, signature, submitted]);
 
-  const payload: ConsentSubmitPayload = useMemo(
-    () => ({
+  const payload: ConsentSubmitPayload = useMemo(() => {
+    const base: ConsentSubmitPayload = {
       serviceId: serviceId || undefined,
       formId: formId || undefined,
       enforcement,
       heading: heading || DEFAULT_HEADING,
       consent: consent || DEFAULT_CONSENT,
-      typedName: typedName.trim() || undefined,
-      accepted,
-      signatureDataUrl: signature || undefined,
-      emailMe,
       submittedAt: new Date().toISOString(),
-    }),
-    [serviceId, formId, enforcement, heading, consent, typedName, accepted, signature, emailMe],
-  );
+    };
+
+    if (enforcement === "TYPED_NAME")
+      base.typedName = typedName.trim() || undefined;
+    if (enforcement === "CHECKBOX_ONLY") base.accepted = accepted;
+    if (enforcement === "DRAW_SIGNATURE") {
+      base.signatureDataUrl = signature || undefined;
+      base.emailMe = emailMe;
+    }
+
+    return stripUndefinedDeep(base);
+  }, [
+    serviceId,
+    formId,
+    enforcement,
+    heading,
+    consent,
+    typedName,
+    accepted,
+    signature,
+    emailMe,
+  ]);
 
   const writeResponse = async (
-    status: "SUBMITTED" | "CANCELLED",
+    status: "CONFIRMED" | "CANCELED",
     data?: ConsentSubmitPayload,
   ) => {
     if (!channelId) return;
-    const ref = doc(db, "pos_consent_responses", channelId);
 
-    await setDoc(
-      ref,
-      {
-        channelId,
-        status,
-        ...(data || {}),
-        serverSubmittedAt: serverTimestamp(),
-      },
-      { merge: true },
-    );
+    const respRef = doc(db, "pos_consent_responses", channelId);
+
+    const safe = stripUndefinedDeep({
+      channelId,
+      status,
+      ...(data || {}),
+      serverSubmittedAt: serverTimestamp(),
+    });
+
+    await setDoc(respRef, safe, { merge: true });
 
     await setDoc(
       doc(db, "pos_consent_requests", channelId),
@@ -197,11 +239,10 @@ export default function ConsentPage() {
     setSubmitting(true);
     setErrorMsg("");
     try {
-      await writeResponse("SUBMITTED", payload);
+      await writeResponse("CONFIRMED", payload);
       setSubmitted(true);
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Something went wrong";
-      setErrorMsg(msg);
+      setErrorMsg(err instanceof Error ? err.message : "Something went wrong");
     } finally {
       setSubmitting(false);
     }
@@ -211,7 +252,7 @@ export default function ConsentPage() {
     setSubmitting(true);
     setErrorMsg("");
     try {
-      await writeResponse("CANCELLED", {
+      await writeResponse("CANCELED", {
         serviceId: serviceId || undefined,
         formId: formId || undefined,
         enforcement,
@@ -220,7 +261,7 @@ export default function ConsentPage() {
         submittedAt: new Date().toISOString(),
       });
       setSubmitted(false);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } catch (e: any) {
       setErrorMsg(e?.message || "Cancel failed");
     } finally {
@@ -247,7 +288,9 @@ export default function ConsentPage() {
         <div className="max-w-xl w-full rounded-2xl bg-red-50 border border-red-200 p-6 text-center">
           <h1 className="text-lg font-bold text-red-700">Firestore error</h1>
           <p className="mt-2 text-sm text-red-700">{fsError}</p>
-          <p className="mt-2 text-xs text-neutral-600">channelId: {channelId}</p>
+          <p className="mt-2 text-xs text-neutral-600">
+            channelId: {channelId}
+          </p>
         </div>
       </div>
     );
@@ -278,6 +321,12 @@ export default function ConsentPage() {
           <h1 className="text-lg sm:text-xl font-bold text-neutral-900">
             {heading}
           </h1>
+
+          {req?.serviceName ? (
+            <div className="mt-1 text-sm text-neutral-600">
+              Service: <span className="font-semibold">{req.serviceName}</span>
+            </div>
+          ) : null}
         </div>
 
         <div className="rounded-[18px] border border-neutral-200 bg-white p-4 sm:p-5 max-h-[360px] overflow-y-auto whitespace-pre-line text-[13px] leading-6 text-neutral-700">
@@ -322,7 +371,10 @@ export default function ConsentPage() {
                       <label className="block text-sm font-semibold text-neutral-800 mb-2">
                         Sign Here
                       </label>
-                      <SignaturePad height={120} onChangeDataUrl={setSignature} />
+                      <SignaturePad
+                        height={120}
+                        onChangeDataUrl={setSignature}
+                      />
                     </div>
 
                     <div className="md:col-span-1 flex md:justify-center">
@@ -333,7 +385,9 @@ export default function ConsentPage() {
                           onChange={(e) => setEmailMe(e.target.checked)}
                           className="h-4 w-4 accent-[#D7263D]"
                         />
-                        <span className="text-sm text-neutral-800">Email me</span>
+                        <span className="text-sm text-neutral-800">
+                          Email me
+                        </span>
                       </label>
                     </div>
 
@@ -381,13 +435,13 @@ export default function ConsentPage() {
             </div>
           ) : null}
 
-          {(serviceId || formId) && (
+          {/* {(serviceId || formId) && (
             <div className="text-xs text-neutral-500">
               {serviceId ? <span>serviceId: {serviceId}</span> : null}
               {serviceId && formId ? <span className="mx-2">•</span> : null}
               {formId ? <span>formId: {formId}</span> : null}
             </div>
-          )}
+          )} */}
         </div>
       </div>
     </div>
