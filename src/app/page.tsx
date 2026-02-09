@@ -49,7 +49,7 @@ export default function LoginPage() {
 
     try {
       const response = await fetch(
-        "https://api.aaravpos.com/api/v1/auth/login",
+        "https://prod.aaravpos.com/api/v1/auth/login",
         {
           method: "POST",
           headers: {

@@ -7,6 +7,7 @@ import { doc, onSnapshot } from "firebase/firestore";
 import DashboardHeader from "@/components/dashboard/DashboardHeader";
 import AppointmentQueue from "@/components/dashboard/AppointmentQueue";
 import BillingDisplay from "@/components/display/BillingDisplay";
+import ConsentPage from "@/components/consent/page";
 
 import { useAuth } from "@/hooks/useAuth";
 import { useWebSocket } from "@/hooks/useWebSocket";
@@ -14,10 +15,21 @@ import { formatAppointmentsToRows } from "@/utils/appointmentUtils";
 import type { Row } from "@/types/appointment";
 
 import { db } from "@/app/firestore";
-import { setBillingStatus, setQueueStatus, shouldShowBilling } from "../../status";
-import ConsentPage from "@/components/consent/page";
+import {
+  setBillingStatus,
+  setQueueStatus,
+  shouldShowBilling,
+} from "../../status";
 
 type DisplayMode = "QUEUE" | "BILLING" | "CONSENT";
+
+function makeConsentChannelId(
+  tenantId: string,
+  outletId: string,
+  staffId: string = "any",
+) {
+  return `${tenantId}_${outletId}_${staffId}`;
+}
 
 export default function Home() {
   const [allRows, setAllRows] = useState<Row[]>([]);
@@ -29,6 +41,8 @@ export default function Home() {
   const [isActive, setIsActive] = useState<boolean>(false);
 
   const [hasPendingConsent, setHasPendingConsent] = useState(false);
+  const [activeConsentChannelId, setActiveConsentChannelId] =
+    useState<string>("");
 
   const router = useRouter();
   const { token, tenantId, outletId } = useAuth();
@@ -36,9 +50,38 @@ export default function Home() {
   const { isConnected, connectionStatus, webSocketData, handleReconnect } =
     useWebSocket({ token, tenantId });
 
-  const consentChannelId = useMemo(() => {
-    if (!tenantId || !outletId) return "";
-    return `${tenantId}_${outletId}_any`;
+  const consentChannelIds = useMemo(() => {
+    const ids = new Set<string>();
+
+    const tokenTenant = tenantId || "";
+    const tokenOutlet = outletId || "";
+
+    const lsTenant =
+      typeof window !== "undefined"
+        ? localStorage.getItem("tenantId") || ""
+        : "";
+    const lsOutlet =
+      typeof window !== "undefined"
+        ? localStorage.getItem("outletId") || ""
+        : "";
+
+    if (tokenTenant && tokenOutlet) {
+      ids.add(makeConsentChannelId(tokenTenant, tokenOutlet, "any"));
+    }
+
+    if (lsTenant && lsOutlet) {
+      ids.add(makeConsentChannelId(lsTenant, lsOutlet, "any"));
+    }
+
+    if (tokenTenant && lsOutlet) {
+      ids.add(makeConsentChannelId(tokenTenant, lsOutlet, "any"));
+    }
+
+    if (lsTenant && tokenOutlet) {
+      ids.add(makeConsentChannelId(lsTenant, tokenOutlet, "any"));
+    }
+
+    return Array.from(ids).filter(Boolean);
   }, [tenantId, outletId]);
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -77,34 +120,56 @@ export default function Home() {
     return () => unsubscribe();
   }, [tenantId, outletId]);
 
-  /* ---------------- Listen to CONSENT request ---------------- */
+  /* ---------------- Listen to CONSENT requests (multi-channel) ---------------- */
   useEffect(() => {
-    if (!consentChannelId) return;
+    if (!consentChannelIds.length) return;
+    debugger;
+    console.log("CONSENT listen candidates:", consentChannelIds);
 
-    const ref = doc(db, "pos_consent_requests", consentChannelId);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const markIdleIfCurrentClears = (cid: string, snapData: any) => {
+      const isPending = snapData?.status === "PENDING";
+      if (!isPending) {
+        setActiveConsentChannelId((prev) => (prev === cid ? "" : prev));
+      }
+    };
 
-    const unsub = onSnapshot(
-      ref,
-      (snap) => {
-        if (!snap.exists()) {
-          setHasPendingConsent(false);
-          return;
-        }
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const data: any = snap.data();
-        const pending = data?.status === "PENDING";
-        setHasPendingConsent(pending);
+    const unsubs = consentChannelIds.map((cid) => {
+      const ref = doc(db, "pos_consent_requests", cid);
 
-        console.log("[CONSENT] request:", { consentChannelId, pending, data });
-      },
-      (err) => {
-        console.error("[CONSENT] listen failed:", err);
-        setHasPendingConsent(false);
-      },
-    );
+      return onSnapshot(
+        ref,
+        (snap) => {
+          if (!snap.exists()) {
+            markIdleIfCurrentClears(cid, null);
+            return;
+          }
 
-    return () => unsub();
-  }, [consentChannelId]);
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const data: any = snap.data();
+          const pending = data?.status === "PENDING";
+
+          console.log("[CONSENT] request:", { cid, pending, data });
+
+          if (pending) {
+            setHasPendingConsent(true);
+            setActiveConsentChannelId(cid);
+          } else {
+            markIdleIfCurrentClears(cid, data);
+          }
+        },
+        (err) => console.error("[CONSENT] listen failed:", cid, err),
+      );
+    });
+
+    return () => {
+      unsubs.forEach((u) => u());
+    };
+  }, [consentChannelIds]);
+
+  useEffect(() => {
+    setHasPendingConsent(Boolean(activeConsentChannelId));
+  }, [activeConsentChannelId]);
 
   /* ---------------- FINAL displayMode decision (priority) ---------------- */
   useEffect(() => {
@@ -112,8 +177,6 @@ export default function Home() {
       setDisplayMode("CONSENT");
       return;
     }
-
-    // otherwise follow billing rule
     if (shouldShowBilling(isActive)) setDisplayMode("BILLING");
     else setDisplayMode("QUEUE");
   }, [hasPendingConsent, isActive]);
@@ -128,7 +191,6 @@ export default function Home() {
 
       try {
         setIsUpdatingStatus(true);
-
         if (mode === "BILLING") await setBillingStatus(tenantId, outletId);
         if (mode === "QUEUE") await setQueueStatus(tenantId, outletId);
       } catch (error) {
@@ -145,8 +207,14 @@ export default function Home() {
   useEffect(() => {
     if (Array.isArray(webSocketData)) {
       const todaysAppointments = filterTodaysAppointments(webSocketData);
-      const formattedRows = formatAppointmentsToRows(todaysAppointments, outletId);
-      const allFormattedRows = formatAppointmentsToRows(webSocketData, outletId);
+      const formattedRows = formatAppointmentsToRows(
+        todaysAppointments,
+        outletId,
+      );
+      const allFormattedRows = formatAppointmentsToRows(
+        webSocketData,
+        outletId,
+      );
 
       setAllRows(allFormattedRows);
       setTodaysRows(formattedRows);
@@ -219,7 +287,9 @@ export default function Home() {
 
       <main className="px-4 sm:px-6 py-6">
         <div className="mx-auto w-full max-w-auto bg-white">
-          {displayMode === "CONSENT" && <ConsentPage />}
+          {displayMode === "CONSENT" && (
+            <ConsentPage channelIdOverride={activeConsentChannelId} />
+          )}
 
           {displayMode === "QUEUE" && (
             <div

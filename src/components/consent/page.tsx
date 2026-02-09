@@ -12,8 +12,18 @@ import {
 import { db } from "@/app/firestore";
 import { useAuth } from "@/hooks/useAuth";
 
-export type EnforcementValue = "DRAW_SIGNATURE" | "TYPED_NAME" | "CHECKBOX_ONLY";
+function makeConsentChannelId(
+  tenantId: string,
+  outletId: string,
+  staffId: string = "any",
+) {
+  return `${tenantId}_${outletId}_${staffId}`;
+}
 
+export type EnforcementValue =
+  | "DRAW_SIGNATURE"
+  | "TYPED_NAME"
+  | "CHECKBOX_ONLY";
 type ConsentResponseStatus = "CONFIRMED" | "CANCELED";
 
 type ConsentSubmitPayload = {
@@ -30,9 +40,9 @@ type ConsentSubmitPayload = {
   heading: string;
   consent: string;
   typedName?: string;
-  accepted?: boolean; 
+  accepted?: boolean;
   isChecked?: boolean;
-  signatureDataUrl?: string; 
+  signatureDataUrl?: string;
   imageUrl?: string;
   emailMe?: boolean;
   channel?: string;
@@ -69,18 +79,11 @@ function isEnforcement(v: any): v is EnforcementValue {
   return v === "TYPED_NAME" || v === "CHECKBOX_ONLY" || v === "DRAW_SIGNATURE";
 }
 
-function makeChannelId(tenantId: string, outletId: string) {
-  return `${tenantId}_${outletId}_any`;
-}
-
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const stripUndefinedDeep = (val: any): any => {
   if (val === undefined) return undefined;
-
-  if (Array.isArray(val)) {
+  if (Array.isArray(val))
     return val.map(stripUndefinedDeep).filter((x) => x !== undefined);
-  }
-
   if (val && typeof val === "object") {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const out: any = {};
@@ -90,17 +93,21 @@ const stripUndefinedDeep = (val: any): any => {
     });
     return out;
   }
-
   return val;
 };
 
-export default function ConsentPage() {
+export default function ConsentPage({
+  channelIdOverride,
+}: {
+  channelIdOverride?: string;
+}) {
   const { tenantId, outletId } = useAuth();
 
   const channelId = useMemo(() => {
+    if (channelIdOverride) return channelIdOverride;
     if (!tenantId || !outletId) return "";
-    return makeChannelId(String(tenantId), String(outletId));
-  }, [tenantId, outletId]);
+    return makeConsentChannelId(String(tenantId), String(outletId), "any");
+  }, [tenantId, outletId, channelIdOverride]);
 
   const [req, setReq] = useState<ConsentRequest | null>(null);
   const [fsError, setFsError] = useState("");
@@ -122,7 +129,6 @@ export default function ConsentPage() {
 
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const data: any = snap.data();
-
         if (data?.status !== "PENDING") {
           setReq(null);
           return;
@@ -139,7 +145,9 @@ export default function ConsentPage() {
           outletId: String(data?.outletId || ""),
           staffId: data?.staffId ? String(data.staffId) : undefined,
 
-          appointmentId: data?.appointmentId ? String(data.appointmentId) : undefined,
+          appointmentId: data?.appointmentId
+            ? String(data.appointmentId)
+            : undefined,
           customerId: data?.customerId ? String(data.customerId) : undefined,
           channel: data?.channel ? String(data.channel) : undefined,
 
@@ -155,7 +163,7 @@ export default function ConsentPage() {
         console.error("❌ Consent request listen failed:", err);
         setFsError(err.message || "Failed to listen consent request");
         setReq(null);
-      }
+      },
     );
 
     return () => unsub();
@@ -163,7 +171,7 @@ export default function ConsentPage() {
 
   const enforcement = useMemo<EnforcementValue>(
     () => req?.enforcement || "TYPED_NAME",
-    [req]
+    [req],
   );
   const heading = useMemo(() => req?.heading || DEFAULT_HEADING, [req]);
   const consent = useMemo(() => req?.consent || DEFAULT_CONSENT, [req]);
@@ -203,21 +211,15 @@ export default function ConsentPage() {
       tenantId: req?.tenantId || String(tenantId || ""),
       outletId: req?.outletId || String(outletId || ""),
       staffId: req?.staffId,
-
       appointmentId: req?.appointmentId,
       customerId: req?.customerId,
-
       serviceId: serviceId || undefined,
-
       formId: formId || undefined,
       concentFormId: formId || undefined,
-
       enforcement,
       heading: heading || DEFAULT_HEADING,
       consent: consent || DEFAULT_CONSENT,
-
       channel: req?.channel || "POS",
-
       submittedAt: new Date().toISOString(),
     };
 
@@ -225,16 +227,14 @@ export default function ConsentPage() {
       base.signatureType = "TYPED_NAME";
       base.typedName = typedName.trim() || undefined;
     }
-
     if (enforcement === "CHECKBOX_ONLY") {
       base.signatureType = "CHECKBOX_ONLY";
       base.accepted = accepted;
-      base.isChecked = accepted; 
+      base.isChecked = accepted;
     }
-
     if (enforcement === "DRAW_SIGNATURE") {
       base.signatureType = "SIGNATURE_IMAGE";
-      base.signatureDataUrl = signature || undefined; 
+      base.signatureDataUrl = signature || undefined;
       base.imageUrl = signature || undefined;
       base.emailMe = emailMe;
     }
@@ -257,7 +257,7 @@ export default function ConsentPage() {
 
   const writeResponse = async (
     status: ConsentResponseStatus,
-    data?: ConsentSubmitPayload
+    data?: ConsentSubmitPayload,
   ) => {
     if (!channelId) return;
 
@@ -275,7 +275,7 @@ export default function ConsentPage() {
     await setDoc(
       doc(db, "pos_consent_requests", channelId),
       { status: "IDLE", updatedAt: serverTimestamp() },
-      { merge: true }
+      { merge: true },
     );
   };
 
@@ -297,41 +297,7 @@ export default function ConsentPage() {
     setSubmitting(true);
     setErrorMsg("");
     try {
-      await writeResponse("CANCELED", {
-        tenantId: req?.tenantId || String(tenantId || ""),
-        outletId: req?.outletId || String(outletId || ""),
-        staffId: req?.staffId,
-
-        appointmentId: req?.appointmentId,
-        customerId: req?.customerId,
-
-        serviceId: serviceId || undefined,
-        formId: formId || undefined,
-        concentFormId: formId || undefined,
-
-        enforcement,
-        signatureType:
-          enforcement === "DRAW_SIGNATURE"
-            ? "SIGNATURE_IMAGE"
-            : enforcement === "CHECKBOX_ONLY"
-              ? "CHECKBOX_ONLY"
-              : "TYPED_NAME",
-
-        heading: heading || DEFAULT_HEADING,
-        consent: consent || DEFAULT_CONSENT,
-
-        accepted: enforcement === "CHECKBOX_ONLY" ? accepted : undefined,
-        isChecked: enforcement === "CHECKBOX_ONLY" ? accepted : undefined,
-
-        signatureDataUrl: enforcement === "DRAW_SIGNATURE" ? signature || undefined : undefined,
-        imageUrl: enforcement === "DRAW_SIGNATURE" ? signature || undefined : undefined,
-        emailMe: enforcement === "DRAW_SIGNATURE" ? emailMe : undefined,
-
-        channel: req?.channel || "POS",
-
-        submittedAt: new Date().toISOString(),
-      });
-
+      await writeResponse("CANCELED", payload);
       setSubmitted(false);
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } catch (e: any) {
@@ -360,7 +326,9 @@ export default function ConsentPage() {
         <div className="max-w-xl w-full rounded-2xl bg-red-50 border border-red-200 p-6 text-center">
           <h1 className="text-lg font-bold text-red-700">Firestore error</h1>
           <p className="mt-2 text-sm text-red-700">{fsError}</p>
-          <p className="mt-2 text-xs text-neutral-600">channelId: {channelId}</p>
+          <p className="mt-2 text-xs text-neutral-600">
+            channelId: {channelId}
+          </p>
         </div>
       </div>
     );
@@ -441,7 +409,10 @@ export default function ConsentPage() {
                       <label className="block text-sm font-semibold text-neutral-800 mb-2">
                         Sign Here
                       </label>
-                      <SignaturePad height={120} onChangeDataUrl={setSignature} />
+                      <SignaturePad
+                        height={120}
+                        onChangeDataUrl={setSignature}
+                      />
                     </div>
 
                     <div className="md:col-span-1 flex md:justify-center">
@@ -452,7 +423,9 @@ export default function ConsentPage() {
                           onChange={(e) => setEmailMe(e.target.checked)}
                           className="h-4 w-4 accent-[#D7263D]"
                         />
-                        <span className="text-sm text-neutral-800">Email me</span>
+                        <span className="text-sm text-neutral-800">
+                          Email me
+                        </span>
                       </label>
                     </div>
 
