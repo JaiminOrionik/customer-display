@@ -123,7 +123,6 @@ export default function Home() {
   /* ---------------- Listen to CONSENT requests (multi-channel) ---------------- */
   useEffect(() => {
     if (!consentChannelIds.length) return;
-    debugger;
     console.log("CONSENT listen candidates:", consentChannelIds);
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
