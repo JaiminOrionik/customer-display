@@ -73,9 +73,22 @@ export const filterAppointmentsByOutlet = (appointments: Appointment[], outletId
   return appointments.filter(app => app.outletId === outletId);
 };
 
-export const formatAppointmentsToRows = (appointments: Appointment[], outletId: string | null): Row[] => {
+// In utils/appointmentUtils.ts
+export const formatAppointmentsToRows = (
+  appointments: Appointment[], 
+  outletId: string | null,
+  showOnlyActive: boolean = true // Add this parameter
+): Row[] => {
   // Filter by outlet
-  const filteredAppointments = filterAppointmentsByOutlet(appointments, outletId);
+  let filteredAppointments = filterAppointmentsByOutlet(appointments, outletId);
+  
+  // Filter by status if showOnlyActive is true
+  if (showOnlyActive) {
+    const activeStatuses = ['BOOKED', 'CHECKED_IN', 'IN_PROGRESS', 'CONFIRMED'];
+    filteredAppointments = filteredAppointments.filter(app => 
+      activeStatuses.includes(app.status)
+    );
+  }
   
   // Format rows with time calculation
   const rows = filteredAppointments.map((app, index) => {

@@ -1,8 +1,9 @@
-// src/hooks/useWebSocket.ts
+// src/hooks/useWebSocket.ts (with socket.io-client)
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
-import type { WebSocketMessage, Appointment } from "@/types/appointment";
+import { io, Socket } from "socket.io-client";
+import type { Appointment } from "@/types/appointment";
 
 interface UseWebSocketProps {
   token: string | null;
@@ -14,137 +15,124 @@ export const useWebSocket = ({ token, tenantId }: UseWebSocketProps) => {
   const [connectionStatus, setConnectionStatus] = useState("Disconnected");
   const [webSocketData, setWebSocketData] = useState<Appointment[] | null>(null);
   
-  const wsRef = useRef<WebSocket | null>(null);
-  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const socketRef = useRef<Socket | null>(null);
   const reconnectAttemptsRef = useRef(0);
   const maxReconnectAttempts = 5;
 
-  // Prevent unnecessary re-renders
-  const tokenRef = useRef(token);
-  const tenantIdRef = useRef(tenantId);
-
-  useEffect(() => {
-    tokenRef.current = token;
-    tenantIdRef.current = tenantId;
-  }, [token, tenantId]);
-
-  const connectWebSocket = useCallback(() => {
-    // Don't connect if no credentials
-    if (!tokenRef.current || !tenantIdRef.current) {
-      console.log("No credentials available, skipping WebSocket connection");
-      return () => {};
+  const connectSocket = useCallback(() => {
+    if (!token) {
+      console.error("Token is required for Socket.IO connection");
+      return;
     }
 
-    // Close existing connection
-    if (wsRef.current) {
-      wsRef.current.close();
-      wsRef.current = null;
+    // Cleanup existing socket
+    if (socketRef.current) {
+      socketRef.current.disconnect();
+      socketRef.current = null;
     }
 
-    // Clear any existing reconnect timeout
-    if (reconnectTimeoutRef.current) {
-      clearTimeout(reconnectTimeoutRef.current);
-      reconnectTimeoutRef.current = null;
-    }
-
-    const wsUrl = `wss://api.aaravpos.com/ws/queue?tenantId=${tenantIdRef.current}&token=${tokenRef.current}`;
-    console.log("Attempting WebSocket connection to:", wsUrl.substring(0, 50) + "...");
+    console.log("Connecting to Socket.IO...");
     
-    const ws = new WebSocket(wsUrl);
-    wsRef.current = ws;
+    // Create Socket.IO connection
+    const socket = io("wss://prod.aaravpos.com", {
+      path: "/socket.io/",
+      transports: ["websocket"],
+      query: {
+        token: token,
+        EIO: "4",
+        transport: "websocket"
+      },
+      reconnection: true,
+      reconnectionAttempts: maxReconnectAttempts,
+      reconnectionDelay: 1000,
+      reconnectionDelayMax: 5000,
+      timeout: 20000,
+    });
 
-    const onOpen = () => {
-      console.log("WebSocket connected successfully");
+    socketRef.current = socket;
+
+    socket.on("connect", () => {
+      console.log("Socket.IO connected successfully");
       setIsConnected(true);
       setConnectionStatus("Connected");
-      reconnectAttemptsRef.current = 0; // Reset reconnect attempts
-      
-      ws.send(JSON.stringify({
-        type: 'subscribe',
-        channel: 'queue_updates'
-      }));
-    };
-    
-    const onMessage = (event: MessageEvent) => {
-      try {
-        const message: WebSocketMessage = JSON.parse(event.data);
-        if (message.type === 'INITIAL_DATA' || message.type === 'queue_update') {
-          if (Array.isArray(message.data)) {
-            setWebSocketData(message.data);
-          }
-        }
-      } catch (error) {
-        console.error("Error parsing WebSocket message:", error);
-      }
-    };
-    
-    const onError = (error: Event) => {
-      console.error("WebSocket error:", error);
+      reconnectAttemptsRef.current = 0;
+    });
+
+    socket.on("connect_error", (error) => {
+      console.error("Socket.IO connection error:", error);
       setIsConnected(false);
-      setConnectionStatus("Error");
-    };
-    
-    const onClose = (event: CloseEvent) => {
-      console.log("WebSocket closed:", event.code, event.reason);
+      setConnectionStatus(`Error: ${error.message}`);
+    });
+
+    socket.on("disconnect", (reason) => {
+      console.log("Socket.IO disconnected:", reason);
       setIsConnected(false);
       setConnectionStatus("Disconnected");
-      
-      // Don't reconnect if closed intentionally or due to auth failure
-      if (event.code === 1000 || event.code === 1008) { // Normal closure or policy violation
-        console.log("WebSocket closed intentionally, not reconnecting");
-        return;
-      }
-      
-      // Exponential backoff for reconnection
-      if (reconnectAttemptsRef.current < maxReconnectAttempts) {
-        reconnectAttemptsRef.current++;
-        const delay = Math.min(1000 * Math.pow(2, reconnectAttemptsRef.current), 30000);
+    });
+
+    socket.on("queue_update", (data: any) => {
+      console.log("Received queue_update:", data);
+      if (data && Array.isArray(data.appointments)) {
+        const appointments: Appointment[] = data.appointments.map((item: any) => ({
+          appointmentId: item.id || item.appointmentId,
+          customerName: `${item.customer?.firstName || item.customer?.first_name || ""} ${item.customer?.lastName || item.customer?.last_name || ""}`.trim(),
+          appointmentTime: item.startLocal || item.appointmentTime || item.startTime,
+          status: item.status,
+          outletId: item.outletId || tenantId || "",
+          isWalkIn: item.isWalkIn || false,
+          queuePosition: item.queuePosition || 0,
+          staffName: `${item.staff?.firstName || ""} ${item.staff?.lastName || ""}`.trim(),
+          services: item.services?.map((s: any) => s.name || s.service?.name).join(", ") || "",
+          paymentStatus: item.paymentStatus || "PENDING",
+          startUtc: item.startUtc || item.startTime,
+          endUtc: item.endUtc || item.endTime,
+        }));
         
-        console.log(`Reconnecting attempt ${reconnectAttemptsRef.current} in ${delay}ms`);
-        
-        reconnectTimeoutRef.current = setTimeout(() => {
-          if (tokenRef.current && tenantIdRef.current) {
-            connectWebSocket();
-          }
-        }, delay);
-      } else {
-        console.log("Max reconnection attempts reached");
-        setConnectionStatus("Disconnected - Max retries reached");
+        console.log(`Processed ${appointments.length} appointments`);
+        setWebSocketData(appointments);
       }
-    };
-    
-    ws.onopen = onOpen;
-    ws.onmessage = onMessage;
-    ws.onerror = onError;
-    ws.onclose = onClose;
-    
-    return () => {
-      console.log("Cleaning up WebSocket connection");
-      if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
-        ws.close(1000, "Component unmounting");
-      }
-    };
-  }, []); // Empty dependency array - only create once
+    });
+
+    socket.on("appointment_created", (data: any) => {
+      console.log("New appointment created:", data);
+    });
+
+    socket.on("appointment_updated", (data: any) => {
+      console.log("Appointment updated:", data);
+    });
+
+    socket.on("appointment_cancelled", (data: any) => {
+      console.log("Appointment cancelled:", data);
+    });
+  }, [token, tenantId]);
 
   const handleReconnect = useCallback(() => {
     console.log("Manual reconnect triggered");
     reconnectAttemptsRef.current = 0;
-    connectWebSocket();
-  }, [connectWebSocket]);
+    if (socketRef.current) {
+      socketRef.current.disconnect();
+      socketRef.current = null;
+    }
+    connectSocket();
+  }, [connectSocket]);
 
-  // Cleanup on unmount
+  // Connect on mount
   useEffect(() => {
+    if (token && tenantId) {
+      console.log("Credentials available, connecting Socket.IO");
+      connectSocket();
+    } else {
+      console.log("Waiting for credentials to connect Socket.IO");
+    }
+
     return () => {
-      console.log("useWebSocket cleanup");
-      if (reconnectTimeoutRef.current) {
-        clearTimeout(reconnectTimeoutRef.current);
-      }
-      if (wsRef.current) {
-        wsRef.current.close(1000, "Component unmounting");
-        wsRef.current = null;
+      console.log("useWebSocket cleanup on unmount");
+      if (socketRef.current) {
+        socketRef.current.disconnect();
+        socketRef.current = null;
       }
     };
-  }, []);
+  }, [token, tenantId, connectSocket]);
 
   return {
     isConnected,
