@@ -1,12 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import {
-  doc,
-  onSnapshot,
-  Timestamp,
-  type FirestoreError,
-} from "firebase/firestore";
+import { doc, onSnapshot, Timestamp, type FirestoreError } from "firebase/firestore";
 import { db } from "@/app/firestore";
 import { useAuth } from "@/hooks/useAuth";
 
@@ -54,7 +49,12 @@ interface Totals {
   paidCents: number;
   tenderedCents: number;
   totalCents: number;
+
+  // these are present in firebase as per your log
   discountCents: number;
+  discount?: number;
+  taxCents?: number;
+  tipCents?: number;
 }
 
 type FsTimestamp = Timestamp | null | undefined;
@@ -75,11 +75,8 @@ interface FirestoreData {
 }
 
 export default function BillingDisplay() {
-  const [firestoreData, setFirestoreData] = useState<FirestoreData | null>(
-    null,
-  );
+  const [firestoreData, setFirestoreData] = useState<FirestoreData | null>(null);
   const [error, setError] = useState<string | null>(null);
-
   const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
 
   const { tenantId, outletId } = useAuth();
@@ -120,7 +117,7 @@ export default function BillingDisplay() {
         console.error("Error loading billing data:", err);
         setError("Failed to load billing data");
         setHasLoadedOnce(true);
-      },
+      }
     );
 
     return () => unsubscribe();
@@ -152,12 +149,32 @@ export default function BillingDisplay() {
       items.reduce((sum, it) => sum + (it.lineTotalCents || 0), 0) || 0;
 
     const subTotalCents = totals?.totalCents || itemsSubtotalCents;
-    const discountCents = totals?.discountCents || 0;
 
-    const taxCents = summary ? parseFloat(summary.tax) * 100 : 0;
+    const discountCents =
+      typeof totals?.discountCents === "number"
+        ? totals.discountCents
+        : typeof totals?.discount === "number"
+          ? totals.discount
+          : 0;
+
+    const taxFromSummaryCents =
+      summary && summary.tax
+        ? Math.round(parseFloat(summary.tax || "0") * 100)
+        : 0;
+
+    const itemsTaxCents =
+      items.reduce((sum, it) => sum + (it.taxCents || 0), 0) || 0;
+
+    const taxCents =
+      typeof totals?.taxCents === "number"
+        ? totals.taxCents
+        : taxFromSummaryCents || itemsTaxCents || 0;
+
+    const itemsTipCents =
+      items.reduce((sum, it) => sum + (it.tipCents || 0), 0) || 0;
 
     const tipCents =
-      items.reduce((sum, it) => sum + (it.tipCents || 0), 0) || 0;
+      typeof totals?.tipCents === "number" ? totals.tipCents : itemsTipCents;
 
     const grandTotalCents = totals?.totalCents || subTotalCents;
 
@@ -277,10 +294,7 @@ export default function BillingDisplay() {
             <div className="text-2xl font-semibold text-gray-900 truncate">
               {customerName}
             </div>
-            <div
-              className="mt-1 text-sm text-gray-600 truncate "
-              title={customerSub}
-            >
+            <div className="mt-1 text-sm text-gray-600 truncate " title={customerSub}>
               {customerSub}
             </div>
           </div>
@@ -294,44 +308,25 @@ export default function BillingDisplay() {
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="bg-gray-100 text-gray-700">
-                      <th className="px-4 py-3 text-left font-semibold w-16">
-                        No.
-                      </th>
-                      <th className="px-4 py-3 text-left font-semibold">
-                        Item
-                      </th>
-                      <th className="px-4 py-3 text-left font-semibold w-40">
-                        Provider
-                      </th>
-                      <th className="px-4 py-3 text-center font-semibold w-28">
-                        Quantity
-                      </th>
-                      <th className="px-4 py-3 text-right font-semibold w-32">
-                        Price
-                      </th>
-                      <th className="px-4 py-3 text-right font-semibold w-32">
-                        Amount
-                      </th>
+                      <th className="px-4 py-3 text-left font-semibold w-16">No.</th>
+                      <th className="px-4 py-3 text-left font-semibold">Item</th>
+                      <th className="px-4 py-3 text-left font-semibold w-40">Provider</th>
+                      <th className="px-4 py-3 text-center font-semibold w-28">Quantity</th>
+                      <th className="px-4 py-3 text-right font-semibold w-32">Price</th>
+                      <th className="px-4 py-3 text-right font-semibold w-32">Amount</th>
                     </tr>
                   </thead>
 
                   <tbody className="text-gray-900">
                     {computed.items.length > 0 ? (
                       computed.items.map((item, index) => (
-                        <tr
-                          key={item.id || index}
-                          className="border-t border-gray-200"
-                        >
+                        <tr key={item.id || index} className="border-t border-gray-200">
                           <td className="px-4 py-3">{index + 1}.</td>
                           <td className="px-4 py-3">
                             <div className="font-medium">{item.name}</div>
                           </td>
-                          <td className="px-4 py-3">
-                            {item.serviceProvider || "-"}
-                          </td>
-                          <td className="px-4 py-3 text-center">
-                            {item.qty || 1}
-                          </td>
+                          <td className="px-4 py-3">{item.serviceProvider || "-"}</td>
+                          <td className="px-4 py-3 text-center">{item.qty || 1}</td>
                           <td className="px-4 py-3 text-right font-medium">
                             {formatCentsToDollars(item.unitPriceCents || 0)}
                           </td>
@@ -343,9 +338,7 @@ export default function BillingDisplay() {
                     ) : (
                       <tr>
                         <td colSpan={5} className="px-4 py-10 text-center">
-                          <div className="text-gray-500">
-                            No items in session
-                          </div>
+                          <div className="text-gray-500">No items in session</div>
                         </td>
                       </tr>
                     )}
@@ -365,9 +358,7 @@ export default function BillingDisplay() {
                 <div className="text-3xl font-normal text-red-700 leading-none">
                   {computed.itemsCount}
                 </div>
-                <div className="text-xl  font-semibold text-gray-900 mt-1">
-                  Items
-                </div>
+                <div className="text-xl font-semibold text-gray-900 mt-1">Items</div>
               </div>
 
               {/* Breakdown */}
@@ -383,7 +374,7 @@ export default function BillingDisplay() {
                   <span className="font-semibold">Discount :</span>
                   <span className="font-semibold">
                     {computed.discountCents > 0
-                      ? `${formatCentsToDollars(computed.discountCents)}`
+                      ? formatCentsToDollars(computed.discountCents)
                       : "$0.00"}
                   </span>
                 </div>
@@ -405,7 +396,7 @@ export default function BillingDisplay() {
                 </div>
               </div>
 
-              {/* DYNAMIC CARD: Grand Total / Amount Due / Change Due */}
+              {/* DYNAMIC CARD */}
               <div className="lg:mt-6 bg-red-700 text-white rounded-2xl px-6 py-6 text-center shadow-md min-w-60">
                 <div className="text-base font-semibold opacity-95">
                   {payView.topTitle}
@@ -420,8 +411,6 @@ export default function BillingDisplay() {
                   {payView.bottomAmount ? ` ${payView.bottomAmount}` : ""}
                 </div>
               </div>
-
-              {/* <div className="h-1" /> */}
             </div>
           </div>
         </div>
